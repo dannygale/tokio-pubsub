@@ -1,79 +1,13 @@
-/// `EventBus` implements configurable multi-producer, multi-consumer event router. It uses
-/// standard mpsc channels and allows `EventSender`s to send events to subscribed `EventReceiver`s.
-/// `EventReceiver`s can subscribe to multiple `EventSender`s. 
-///
-///
-/// Event Bus use cases:
-/// - Multiple data generators can each feed multiple pipelines
-/// - An Exchange can serve multiple portfolios
-///     - TODO: this won't work with the architecture here
-///
+use crate::*;
 
-use std::collections::{HashMap, BTreeMap, BTreeSet};
-use std::hash::Hash;
-use std::fmt::Debug;
-
-use serde::{Serialize, Deserialize};
-use thiserror::Error;
-use tokio::sync::mpsc;
-use uuid::Uuid;
-
-use crate::Result;
-use crate::event::{Event, IsEvent, EventKind};
-
-#[derive(Error, Debug)]
-pub enum EventBusError {
-    #[error("Unknown EventSender")]
-    UnknownEventSender,
-
-    #[error("Unknown EventReceiver")]
-    UnknownEventReceiver,
-
-    #[error("Duplicate EventSender")]
-    DuplicateEventSender,
-
-    #[error("Duplicate EventReceiver")]
-    DuplicateEventReceiver,
-}
-
-pub trait EventBus {
-    type ActorId;
-    type Rx;
-    type Tx;
-    type Message: IsEvent<Self::ActorId>;
-
-    fn channel(&self) -> Self::Tx;
-    fn subscribe(&mut self, rx: Self::ActorId, tx: Self::ActorId, kind: EventKind) -> Result<()>;
-    fn add_sender(&mut self, id: Self::ActorId) -> Result<()>;
-    fn add_receiver(&mut self, id: Self::ActorId, channel: Self::Tx)-> Result<()>;
-    fn rm_sender(&mut self, id: Self::ActorId) -> Result<()>;
-    fn rm_receiver(&mut self, id: Self::ActorId) -> Result<Self::Tx>;
-}
-
-#[derive(Default)]
-struct EventSender<Id: Default> {
-    subscribers: BTreeMap<EventKind, BTreeSet<Id>>,
-}
-
-#[derive(Default)]
-struct EventReceiver<Id, Tx> {
-    channel: Tx,
-    subscribed_to: BTreeMap<Id, BTreeSet<EventKind>>
-}
-
-impl<Id, Tx> EventReceiver<Id, Tx> {
-    pub fn new(channel: Tx) -> Self {
-        Self { channel, subscribed_to: BTreeMap::new() }
-    }
-}
-
+use std::sync::mpsc;
 
 /// an implementation of `EventBus` that relies on Tokio's `mpsc` channels
-pub struct TokioEventBus<Id: Hash+Default, Ev: IsEvent<Id>> {
+pub struct SyncEventBus<Id, Ev> {
     events_rx: mpsc::Receiver<Ev>,
     events_tx: mpsc::Sender<Ev>,
 
-    senders: HashMap<Id, EventSender<Id>>,
+    senders: HashMap<Id, EventSender<Id, Ev>>,
     receivers: HashMap<Id, EventReceiver<Id, mpsc::Sender<Ev>>>,
 
     sink: mpsc::UnboundedSender<Ev>,
