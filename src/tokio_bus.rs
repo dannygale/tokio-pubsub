@@ -74,6 +74,7 @@ where Id: Hash + Default + Sync + Send + Eq + Ord,
                         for rx_id in subscribers.iter() {
                             if !sent_to.contains(&rx_id) {
                                 if let Some(rx) = self.receivers.get(rx_id) {
+                                    // TODO: replace this unwrap
                                     rx.channel.send(event.clone()).await.unwrap();
                                 }
                             }

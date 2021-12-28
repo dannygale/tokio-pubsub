@@ -33,6 +33,9 @@ pub enum EventBusError {
 
     #[error("Duplicate EventReceiver")]
     DuplicateEventReceiver,
+
+    #[error("Send Error")]
+    SendError
 }
 
 #[derive(PartialOrd, Ord, PartialEq, Eq, Clone)]
@@ -41,6 +44,11 @@ pub enum Subscription<T: Clone> {
     Kind(T),
     Direct
 }
+
+pub(crate) enum BusEvent {
+    Error(EventBusError),
+}
+
 
 // TODO: create a BusEvent that wraps real Events but also handles subscribe/etc
 // TODO: update to work with Arc<impl EventSender> and Arc<impl EventReceiver> instead of IDs
