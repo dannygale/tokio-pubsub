@@ -1,54 +1,107 @@
-use std::collections::{HashMap, BTreeMap, BTreeSet};
-use std::hash::Hash;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Debug;
+use std::hash::Hash;
+use std::sync::Arc;
 
-use tokio::sync::mpsc;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{self, error::TrySendError};
 
 use crate::{
-    Result, EventBusError, 
-    EventBus, EventSender, EventReceiver, IsEvent,
+    BusEvent, BusEventKind, EventBus, EventBusError, EventReceiver, EventSender, IsEvent, Result,
     Subscription,
-
 };
 
 /// an implementation of `EventBus` that relies on Tokio's `mpsc` channels
-pub struct TokioEventBus<Id, EventKind: Clone, Event> {
-    events_rx: mpsc::Receiver<Event>,
-    events_tx: mpsc::Sender<Event>,
+pub struct TokioEventBus<Id, Kind: Clone, Event, F> {
+    events_rx: mpsc::Receiver<BusEvent<Id, Event, Kind>>,
+    events_tx: mpsc::Sender<BusEvent<Id, Event, Kind>>,
 
-    senders: HashMap<Id, EventSender<Id, Subscription<EventKind>>>,
-    receivers: HashMap<Id, EventReceiver<Id, mpsc::Sender<Event>, EventKind>>,
+    receivers: HashMap<Id, (mpsc::Sender<Event>, Vec<Id>)>,
 
-    sink: Option<mpsc::Sender<Event>>
+    subscriptions: HashMap<Id, (Id, F)>,
+
+    sink: Option<mpsc::UnboundedSender<BusEvent<Id, Event, Kind>>>,
 }
 
-impl<Id, EventKind, Event> TokioEventBus<Id, EventKind, Event>
-where Id: Hash + Default + Sync + Send + Eq + Ord,
-      Event: IsEvent<Id, EventKind> + Sync + Send + Clone + Debug,
-      EventKind: Ord + Clone
+impl<Id, EventKind, Event, F> TokioEventBus<Id, EventKind, Event, F>
+where
+    Id: Hash + Default + Sync + Send + Eq + Ord + Clone,
+    Event: IsEvent<Id, EventKind> + Sync + Send + Clone + Debug,
+    EventKind: Ord + Clone,
+    F: Fn(&Event) -> bool,
 {
     pub fn new(n: usize) -> Self {
-        let ( events_tx, events_rx ) = mpsc::channel(n);
-        Self { 
+        let (events_tx, events_rx) = mpsc::channel(n);
+        Self {
             events_rx,
             events_tx,
-            senders: HashMap::new(),
             receivers: HashMap::new(),
-            sink: None
+            subscriptions: HashMap::new(),
+            sink: None,
+        }
+    }
+
+    async fn emit(&self, e: BusEventKind<Id, Event, EventKind>) {
+        self.events_tx.send(e.clone().into()).await;
+        if let Some(sink) = self.sink.as_ref() {
+            sink.send(e.into());
+        }
+    }
+
+    async fn route_event(&self, event: Event) {
+        let subscriptions: Vec<(&Id, &F)> = self
+            .subscriptions
+            .iter()
+            .map(|x| (&x.1 .0, &x.1 .1))
+            .collect();
+
+        for (rx_id, filter) in subscriptions.iter() {
+            if filter(&event) {
+                if let Some((rx, _subs)) = self.receivers.get(&rx_id) {
+                    match rx.try_send(event.clone()) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {
+                            self.emit(EventBusError::ReceiverBlocked.into()).await
+                        }
+                        Err(TrySendError::Closed(_)) => {
+                            self.emit(EventBusError::ReceiverDropped.into()).await
+                        }
+                    }
+                } else {
+                    self.emit(EventBusError::UnknownEventReceiver.into()).await;
+                }
+            }
         }
     }
 
     pub async fn run(&mut self) {
         while let Some(event) = self.events_rx.recv().await {
+            match event.event {
+                BusEventKind::Error(bus_error) => match bus_error {
+                    EventBusError::UnknownEventSender => {}
+                    EventBusError::UnknownEventReceiver => {}
+                    EventBusError::DuplicateEventSender => {}
+                    EventBusError::DuplicateEventReceiver => {}
+                    EventBusError::SendError => {}
+                    EventBusError::ReceiverBlocked => {}
+                    EventBusError::ReceiverDropped => {}
+                    _ => unreachable!(),
+                },
+                BusEventKind::UserEvent(user_event) => self.route_event(user_event).await,
+                BusEventKind::Subscribe { rx, tx, sub } => {}
+                BusEventKind::Unsubscribe { rx, tx, sub } => {}
+            }
+
+            /////////////////////////////////////////////
+
+            /*
             let tx_id = event.sender();
             let kind = event.kind();
 
             let sender = match self.senders.get(&tx_id) {
                 Some(sender) => sender,
-                None => return
+                None => return,
             };
-
 
             // if a destination is specified, don't send to other subscribers
             if let Some(rx_id) = event.dest() {
@@ -56,6 +109,13 @@ where Id: Hash + Default + Sync + Send + Eq + Ord,
                     rx.channel.send(event.clone()).await.unwrap();
                 }
             } else {
+                // no explicit destination -- send to subscribers according to filters
+                for (sub_id, (rx_id, filter)) in self.subscriptions.iter() {
+                    if filter(&event) {
+                        if let Some(rx) = self.receivers.get(&rx_id) {}
+                    }
+                }
+
                 let mut sent_to = BTreeSet::new();
 
                 // send to receivers of all events from this subscriber
@@ -79,7 +139,7 @@ where Id: Hash + Default + Sync + Send + Eq + Ord,
                                 }
                             }
                         }
-                    },
+                    }
                     None => {}
                 }
             }
@@ -88,14 +148,23 @@ where Id: Hash + Default + Sync + Send + Eq + Ord,
             if let Some(sink) = self.sink.as_ref() {
                 sink.send(event).await;
             }
+            */
         }
+    }
+
+    fn subscribe2(&mut self, rx: Id, filter: F) -> Result<()> {
+        let subs = self.subscriptions.entry(rx).or_default();
+        subs.push(filter);
+        Ok(())
     }
 }
 
-impl<'a, Id, EventKind, Event> EventBus for TokioEventBus<Id, EventKind, Event>
-where Id: Serialize + Deserialize<'a> + Hash + Copy + Clone + Ord + Eq + Default,
-      Event: IsEvent<Id, EventKind>,
-      EventKind: Ord + Clone,
+impl<'a, Id, EventKind, Event, F> EventBus for TokioEventBus<Id, EventKind, Event, F>
+where
+    Id: Serialize + Deserialize<'a> + Hash + Copy + Clone + Ord + Eq + Default,
+    Event: IsEvent<Id, EventKind>,
+    EventKind: Ord + Clone,
+    F: Fn(Event) -> bool,
 {
     type Id = Id;
     type Rx = mpsc::Receiver<Event>;
@@ -108,22 +177,23 @@ where Id: Serialize + Deserialize<'a> + Hash + Copy + Clone + Ord + Eq + Default
     }
 
     fn subscribe(&mut self, rx: Id, tx: Id, sub: Subscription<EventKind>) -> Result<()> {
+        let sender = if let Some(sender) = self.senders.get_mut(&tx) {
+            sender
+        } else {
+            Err(EventBusError::UnknownEventSender)?
+        };
 
-        let sender = 
-            if let Some(sender) = self.senders.get_mut(&tx) {
-                sender
-            } else {
-                Err(EventBusError::UnknownEventSender)?
-            };
+        let receiver = if let Some(receiver) = self.receivers.get_mut(&rx) {
+            receiver
+        } else {
+            Err(EventBusError::UnknownEventReceiver)?
+        };
 
-        let receiver =
-            if let Some(receiver) = self.receivers.get_mut(&rx) {
-                receiver
-            } else {
-                Err(EventBusError::UnknownEventReceiver)?
-            };
-
-        sender.subscribers.entry(sub.clone()).or_default().insert(rx);
+        sender
+            .subscribers
+            .entry(sub.clone())
+            .or_default()
+            .insert(rx);
         receiver.subscribed_to.entry(tx).or_default().insert(sub);
 
         Ok(())
@@ -133,7 +203,12 @@ where Id: Serialize + Deserialize<'a> + Hash + Copy + Clone + Ord + Eq + Default
             Err(EventBusError::DuplicateEventSender)?;
         }
 
-        self.senders.insert(id, EventSender { subscribers: BTreeMap::new() });
+        self.senders.insert(
+            id,
+            EventSender {
+                subscribers: BTreeMap::new(),
+            },
+        );
 
         Ok(())
     }
@@ -142,7 +217,7 @@ where Id: Serialize + Deserialize<'a> + Hash + Copy + Clone + Ord + Eq + Default
             Err(EventBusError::DuplicateEventReceiver)?;
         }
 
-        self.receivers.insert(id, EventReceiver::new(channel) );
+        self.receivers.insert(id, EventReceiver::new(channel));
 
         Ok(())
     }
@@ -155,7 +230,9 @@ where Id: Serialize + Deserialize<'a> + Hash + Copy + Clone + Ord + Eq + Default
                 }
             }
             Ok(())
-        } else { Err(EventBusError::UnknownEventSender)? }
+        } else {
+            Err(EventBusError::UnknownEventSender)?
+        }
     }
     fn rm_receiver(&mut self, id: Self::Id) -> Result<Self::Tx> {
         if let Some(receiver) = self.receivers.remove(&id) {
@@ -167,7 +244,9 @@ where Id: Serialize + Deserialize<'a> + Hash + Copy + Clone + Ord + Eq + Default
                 }
             }
             Ok(receiver.channel)
-        } else { Err(EventBusError::UnknownEventReceiver)?}
+        } else {
+            Err(EventBusError::UnknownEventReceiver)?
+        }
     }
 
     fn sink(&mut self) -> Self::Rx {

@@ -1,10 +1,9 @@
-
-use std::collections::{HashMap, BTreeMap, BTreeSet};
-use std::hash::Hash;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Debug;
+use std::hash::Hash;
 
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 //mod sync_bus;
@@ -20,7 +19,7 @@ pub trait IsEvent<Id, EventKind> {
     fn dest(&self) -> Option<Id>;
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum EventBusError {
     #[error("Unknown EventSender")]
     UnknownEventSender,
@@ -35,22 +34,65 @@ pub enum EventBusError {
     DuplicateEventReceiver,
 
     #[error("Send Error")]
-    SendError
+    SendError,
+
+    #[error("Receiver blocked")]
+    ReceiverBlocked,
+
+    #[error("Receiver dropped")]
+    ReceiverDropped,
+}
+
+impl<Id, Ev, Kind: Clone> From<EventBusError> for BusEventKind<Id, Ev, Kind> {
+    fn from(err: EventBusError) -> BusEventKind<Id, Ev, Kind> {
+        BusEventKind::Error(err)
+    }
 }
 
 #[derive(PartialOrd, Ord, PartialEq, Eq, Clone)]
 pub enum Subscription<T: Clone> {
     All,
     Kind(T),
-    Direct
+    Direct,
 }
 
-pub(crate) enum BusEvent {
+#[derive(Clone)]
+pub struct BusEvent<Id, UserEvent, UserEventKind: Clone> {
+    ts: DateTime<Utc>,
+    event: BusEventKind<Id, UserEvent, UserEventKind>,
+}
+
+// TODO: create a BusEvent that wraps real Events and handles subscribe/etc
+#[derive(Clone)]
+pub enum BusEventKind<Id, UserEvent, UserEventKind: Clone> {
     Error(EventBusError),
+    UserEvent(UserEvent),
+    Subscribe {
+        rx: Id,
+        tx: Id,
+        sub: Subscription<UserEventKind>,
+    },
+    Unsubscribe {
+        rx: Id,
+        tx: Id,
+        sub: Subscription<UserEventKind>,
+    },
 }
 
+impl<Id, Ev, K: Clone> From<BusEventKind<Id, Ev, K>> for BusEvent<Id, Ev, K> {
+    fn from(bek: BusEventKind<Id, Ev, K>) -> BusEvent<Id, Ev, K> {
+        BusEvent {
+            ts: Utc::now(),
+            event: bek,
+        }
+    }
+}
+impl<Id, Ev, K: Clone> From<BusEvent<Id, Ev, K>> for BusEventKind<Id, Ev, K> {
+    fn from(be: BusEvent<Id, Ev, K>) -> BusEventKind<Id, Ev, K> {
+        be.event
+    }
+}
 
-// TODO: create a BusEvent that wraps real Events but also handles subscribe/etc
 // TODO: update to work with Arc<impl EventSender> and Arc<impl EventReceiver> instead of IDs
 //
 
@@ -66,13 +108,18 @@ pub trait EventBus {
 
     /// subscribe a receiver to a sender for events of a given type, all events from this sender,
     /// or only direct messages
-    fn subscribe(&mut self, rx: Self::Id, tx: Self::Id, subscription: Subscription<Self::EventKind>) -> Result<()>;
+    fn subscribe(
+        &mut self,
+        rx: Self::Id,
+        tx: Self::Id,
+        subscription: Subscription<Self::EventKind>,
+    ) -> Result<()>;
 
     /// add a new sender by Id
     fn add_sender(&mut self, id: Self::Id) -> Result<()>;
 
     /// add a new receiver by Id
-    fn add_receiver(&mut self, id: Self::Id, channel: Self::Tx)-> Result<()>;
+    fn add_receiver(&mut self, id: Self::Id, channel: Self::Tx) -> Result<()>;
 
     /// remove a sender
     fn rm_sender(&mut self, id: Self::Id) -> Result<()>;
@@ -85,20 +132,26 @@ pub trait EventBus {
     fn sink(&mut self) -> Self::Rx;
 }
 
+/// A crate-internal type for tracking the subscribers subscribed to a given sender
 #[derive(Default)]
+#[doc(hidden)]
 pub(crate) struct EventSender<Id, EventKind> {
     subscribers: BTreeMap<EventKind, BTreeSet<Id>>,
 }
 
+/// A crate-internal type for tracking the channel and associated subscriptions for a given sender
 #[derive(Default)]
+#[doc(hidden)]
 pub(crate) struct EventReceiver<Id, Tx, EventKind: Clone> {
     channel: Tx,
-    subscribed_to: BTreeMap<Id, BTreeSet<Subscription<EventKind>>>
+    subscribed_to: BTreeMap<Id, BTreeSet<Subscription<EventKind>>>,
 }
 
 impl<Id, Tx, EventKind: Clone> EventReceiver<Id, Tx, EventKind> {
     pub fn new(channel: Tx) -> Self {
-        Self { channel, subscribed_to: BTreeMap::new() }
+        Self {
+            channel,
+            subscribed_to: BTreeMap::new(),
+        }
     }
 }
-
