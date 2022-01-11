@@ -1,34 +1,30 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, error::TrySendError};
+use uuid::Uuid;
 
-use crate::{
-    BusEvent, BusEventKind, EventBus, EventBusError, EventReceiver, EventSender, IsEvent, Result,
-    Subscription,
-};
+use crate::{BusEvent, BusEventKind, EventBus, EventBusError, IsEvent, Result};
 
 /// an implementation of `EventBus` that relies on Tokio's `mpsc` channels
-pub struct TokioEventBus<Id, Kind: Clone, Event, F> {
-    events_rx: mpsc::Receiver<BusEvent<Id, Event, Kind>>,
-    events_tx: mpsc::Sender<BusEvent<Id, Event, Kind>>,
+pub struct TokioEventBus<Id, Event, Rx, Filter> {
+    events_rx: mpsc::Receiver<BusEvent<Id, Event, Rx, Filter>>,
+    events_tx: mpsc::Sender<BusEvent<Id, Event, Rx, Filter>>,
 
-    receivers: HashMap<Id, (mpsc::Sender<Event>, Vec<Id>)>,
+    receivers: HashMap<Id, (mpsc::Sender<BusEvent<Id, Event, Rx, Filter>>, Vec<Uuid>)>,
 
-    subscriptions: HashMap<Id, (Id, F)>,
+    subscriptions: HashMap<Id, (Id, Filter)>,
 
-    sink: Option<mpsc::UnboundedSender<BusEvent<Id, Event, Kind>>>,
+    sink: Option<mpsc::Sender<BusEvent<Id, Event, Rx, Filter>>>,
 }
 
-impl<Id, EventKind, Event, F> TokioEventBus<Id, EventKind, Event, F>
+impl<Id, Event, Rx, F> TokioEventBus<Id, Event, Rx, F>
 where
     Id: Hash + Default + Sync + Send + Eq + Ord + Clone,
-    Event: IsEvent<Id, EventKind> + Sync + Send + Clone + Debug,
-    EventKind: Ord + Clone,
-    F: Fn(&Event) -> bool,
+    Event: IsEvent + Sync + Send + Clone + Debug,
+    Rx: Clone,
+    F: Fn(&BusEventKind<Id, Event, Rx, F>) -> bool + Clone,
 {
     pub fn new(n: usize) -> Self {
         let (events_tx, events_rx) = mpsc::channel(n);
@@ -41,14 +37,27 @@ where
         }
     }
 
-    async fn emit(&self, e: BusEventKind<Id, Event, EventKind>) {
+    async fn emit(&self, e: BusEventKind<Id, Event, Rx, F>) {
         self.events_tx.send(e.clone().into()).await;
         if let Some(sink) = self.sink.as_ref() {
             sink.send(e.into());
         }
     }
 
-    async fn route_event(&self, event: Event) {
+    async fn send_event(
+        &self,
+        rx: &mpsc::Sender<BusEvent<Id, Event, Rx, F>>,
+        event: BusEventKind<Id, Event, Rx, F>,
+    ) {
+        let event = BusEvent::from(event);
+        match rx.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => self.emit(EventBusError::ReceiverBlocked.into()).await,
+            Err(TrySendError::Closed(_)) => self.emit(EventBusError::ReceiverDropped.into()).await,
+        }
+    }
+
+    async fn route_event(&self, event: BusEventKind<Id, Event, Rx, F>) {
         let subscriptions: Vec<(&Id, &F)> = self
             .subscriptions
             .iter()
@@ -58,15 +67,7 @@ where
         for (rx_id, filter) in subscriptions.iter() {
             if filter(&event) {
                 if let Some((rx, _subs)) = self.receivers.get(&rx_id) {
-                    match rx.try_send(event.clone()) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(_)) => {
-                            self.emit(EventBusError::ReceiverBlocked.into()).await
-                        }
-                        Err(TrySendError::Closed(_)) => {
-                            self.emit(EventBusError::ReceiverDropped.into()).await
-                        }
-                    }
+                    self.send_event(rx, event.clone()).await;
                 } else {
                     self.emit(EventBusError::UnknownEventReceiver.into()).await;
                 }
@@ -76,7 +77,8 @@ where
 
     pub async fn run(&mut self) {
         while let Some(event) = self.events_rx.recv().await {
-            match event.event {
+            let e = event.event;
+            match e {
                 BusEventKind::Error(bus_error) => match bus_error {
                     EventBusError::UnknownEventSender => {}
                     EventBusError::UnknownEventReceiver => {}
@@ -85,171 +87,63 @@ where
                     EventBusError::SendError => {}
                     EventBusError::ReceiverBlocked => {}
                     EventBusError::ReceiverDropped => {}
-                    _ => unreachable!(),
                 },
-                BusEventKind::UserEvent(user_event) => self.route_event(user_event).await,
-                BusEventKind::Subscribe { rx, tx, sub } => {}
-                BusEventKind::Unsubscribe { rx, tx, sub } => {}
+                _ => self.route_event(e).await,
+                //BusEventKind::UserEvent(_) => self.route_event(e).await,
+                //BusEventKind::Subscribe { rx, filter } => {}
+                //BusEventKind::Unsubscribe { sub_id } => {}
             }
-
-            /////////////////////////////////////////////
-
-            /*
-            let tx_id = event.sender();
-            let kind = event.kind();
-
-            let sender = match self.senders.get(&tx_id) {
-                Some(sender) => sender,
-                None => return,
-            };
-
-            // if a destination is specified, don't send to other subscribers
-            if let Some(rx_id) = event.dest() {
-                if let Some(rx) = self.receivers.get(&rx_id) {
-                    rx.channel.send(event.clone()).await.unwrap();
-                }
-            } else {
-                // no explicit destination -- send to subscribers according to filters
-                for (sub_id, (rx_id, filter)) in self.subscriptions.iter() {
-                    if filter(&event) {
-                        if let Some(rx) = self.receivers.get(&rx_id) {}
-                    }
-                }
-
-                let mut sent_to = BTreeSet::new();
-
-                // send to receivers of all events from this subscriber
-                if let Some(subscribers) = sender.subscribers.get(&Subscription::All) {
-                    for rx_id in subscribers.iter() {
-                        if let Some(rx) = self.receivers.get(rx_id) {
-                            rx.channel.send(event.clone()).await.unwrap();
-                            sent_to.insert(rx_id);
-                        }
-                    }
-                }
-
-                // send to receivers of this kind of event from this subscriber
-                match sender.subscribers.get(&Subscription::Kind(kind)) {
-                    Some(subscribers) => {
-                        for rx_id in subscribers.iter() {
-                            if !sent_to.contains(&rx_id) {
-                                if let Some(rx) = self.receivers.get(rx_id) {
-                                    // TODO: replace this unwrap
-                                    rx.channel.send(event.clone()).await.unwrap();
-                                }
-                            }
-                        }
-                    }
-                    None => {}
-                }
-            }
-
-            // if sink, send to sink too
-            if let Some(sink) = self.sink.as_ref() {
-                sink.send(event).await;
-            }
-            */
         }
-    }
-
-    fn subscribe2(&mut self, rx: Id, filter: F) -> Result<()> {
-        let subs = self.subscriptions.entry(rx).or_default();
-        subs.push(filter);
-        Ok(())
     }
 }
 
-impl<'a, Id, EventKind, Event, F> EventBus for TokioEventBus<Id, EventKind, Event, F>
+impl<'a, Kind, Event, Rx, Filter>
+    EventBus<
+        Uuid,
+        mpsc::Receiver<BusEvent<Uuid, Event, Rx, Filter>>,
+        mpsc::Sender<BusEvent<Uuid, Event, Rx, Filter>>,
+        Kind,
+        Event,
+        Filter,
+    > for TokioEventBus<Uuid, Event, Rx, Filter>
 where
-    Id: Serialize + Deserialize<'a> + Hash + Copy + Clone + Ord + Eq + Default,
-    Event: IsEvent<Id, EventKind>,
-    EventKind: Ord + Clone,
-    F: Fn(Event) -> bool,
+    //Id: Serialize + Deserialize<'a> + Hash + Copy + Clone + Ord + Eq + Default,
+    Event: IsEvent + Sync + Send + Clone + Debug,
+    Rx: Clone,
+    Filter: Fn(Event) -> bool + Clone,
 {
-    type Id = Id;
-    type Rx = mpsc::Receiver<Event>;
-    type Tx = mpsc::Sender<Event>;
-    type EventKind = EventKind;
-    type Event = Event;
-
-    fn channel(&self) -> Self::Tx {
+    fn channel(&self) -> mpsc::Sender<BusEvent<Uuid, Event, Rx, Filter>> {
         self.events_tx.clone()
     }
 
-    fn subscribe(&mut self, rx: Id, tx: Id, sub: Subscription<EventKind>) -> Result<()> {
-        let sender = if let Some(sender) = self.senders.get_mut(&tx) {
-            sender
-        } else {
-            Err(EventBusError::UnknownEventSender)?
-        };
-
-        let receiver = if let Some(receiver) = self.receivers.get_mut(&rx) {
-            receiver
-        } else {
-            Err(EventBusError::UnknownEventReceiver)?
-        };
-
-        sender
-            .subscribers
-            .entry(sub.clone())
-            .or_default()
-            .insert(rx);
-        receiver.subscribed_to.entry(tx).or_default().insert(sub);
-
-        Ok(())
+    fn subscribe(
+        &mut self,
+        rx_id: Uuid,
+        rx_ch: mpsc::Sender<BusEvent<Uuid, Event, Rx, Filter>>,
+        filter: Filter,
+    ) -> Result<Uuid> {
+        let sub_id = Uuid::new_v4();
+        self.receivers.insert(rx_id, (rx_ch, vec![sub_id]));
+        self.subscriptions.insert(sub_id, (rx_id, filter));
+        Ok(sub_id)
     }
-    fn add_sender(&mut self, id: Id) -> Result<()> {
-        if self.senders.contains_key(&id) {
-            Err(EventBusError::DuplicateEventSender)?;
-        }
 
-        self.senders.insert(
-            id,
-            EventSender {
-                subscribers: BTreeMap::new(),
-            },
-        );
-
-        Ok(())
-    }
-    fn add_receiver(&mut self, id: Id, channel: mpsc::Sender<Event>) -> Result<()> {
-        if self.receivers.contains_key(&id) {
-            Err(EventBusError::DuplicateEventReceiver)?;
-        }
-
-        self.receivers.insert(id, EventReceiver::new(channel));
-
-        Ok(())
-    }
-    fn rm_sender(&mut self, id: Self::Id) -> Result<()> {
-        if let Some(sender) = self.senders.remove(&id) {
-            for (_kind, rx_ids) in sender.subscribers {
-                for rx_id in rx_ids {
-                    let rx = self.receivers.get_mut(&rx_id).unwrap();
-                    rx.subscribed_to.remove(&id);
-                }
+    fn unsubscribe(&mut self, sub_id: Uuid) -> Result<()> {
+        if let Some((rx_id, _f)) = self.subscriptions.remove(&sub_id) {
+            if let Some((rx, subs)) = self.receivers.get_mut(&rx_id) {
+            } else {
+                //self.emit(EventBusError::UnknownEventReceiver.into());
+                Err(EventBusError::UnknownEventReceiver)?;
             }
-            Ok(())
-        } else {
-            Err(EventBusError::UnknownEventSender)?
         }
-    }
-    fn rm_receiver(&mut self, id: Self::Id) -> Result<Self::Tx> {
-        if let Some(receiver) = self.receivers.remove(&id) {
-            for (tx_id, kinds) in receiver.subscribed_to {
-                let tx = self.senders.get_mut(&tx_id).unwrap();
-                for kind in kinds {
-                    let subs = tx.subscribers.get_mut(&kind).unwrap();
-                    subs.remove(&id);
-                }
-            }
-            Ok(receiver.channel)
-        } else {
-            Err(EventBusError::UnknownEventReceiver)?
-        }
+        Ok(())
     }
 
-    fn sink(&mut self) -> Self::Rx {
+    fn drop_rx(&mut self, rx_id: Uuid) -> Result<()> {
+        Ok(())
+    }
+
+    fn sink(&mut self) -> mpsc::Receiver<BusEvent<Uuid, Event, Rx, Filter>> {
         let (tx, rx) = mpsc::channel(usize::MAX);
         self.sink = Some(tx);
         rx
