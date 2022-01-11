@@ -2,15 +2,15 @@
 name = "pubsub"
 version = "0.1.0"
 edition = "2021"
+authors = ["Danny Gale <danny.m.gale@gmail.com>"]
+description = "A simple publish/subscribe event bus built on tokio's broadcast channels"
+repository = "github.com/dannygale/tokio-pubsub/"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serde = "1.0.132"
 thiserror = "1.0.30"
 tokio = { version = "1.15.0", features = [ "full" ]}
-chrono = "0.4.19"
-uuid = { version = "0.8.2", features = ["v4", "serde"]}
 
 [dev-dependencies]
 tokio-test = "0.4.2"
