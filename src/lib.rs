@@ -1,104 +1,88 @@
+use std::collections::HashMap;
 use std::fmt::Debug;
 
-use chrono::{DateTime, Utc};
 use thiserror::Error;
+use tokio::sync::broadcast;
 
-//mod sync_bus;
-mod tokio_bus;
-pub use tokio_bus::*;
+use crate::Result;
 
-mod pubsub;
-pub use pubsub::*;
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-pub trait IsEvent {
-    type Id;
-    type Kind;
-
-    fn sender(&self) -> Self::Id;
-    fn kind(&self) -> Self::Kind;
-    fn ts(&self) -> DateTime<Utc>;
-    fn dest(&self) -> Option<Self::Id>;
+#[derive(Error, Debug)]
+pub enum PubSubError {
+    #[error("this topic already exists")]
+    TopicExists(String),
 }
 
-#[derive(Error, Debug, Clone)]
-pub enum EventBusError {
-    #[error("Unknown EventSender")]
-    UnknownEventSender,
+struct PubSub<T> {
+    topics: HashMap<String, broadcast::Sender<T>>,
 
-    #[error("Unknown EventReceiver")]
-    UnknownEventReceiver,
+    events_rx: broadcast::Receiver<(String, T)>,
+    events_tx: broadcast::Sender<(String, T)>,
 
-    #[error("Duplicate EventSender")]
-    DuplicateEventSender,
-
-    #[error("Duplicate EventReceiver")]
-    DuplicateEventReceiver,
-
-    #[error("Send Error")]
-    SendError,
-
-    #[error("Receiver blocked")]
-    ReceiverBlocked,
-
-    #[error("Receiver dropped")]
-    ReceiverDropped,
+    capacity: usize,
 }
 
-impl<Id, Ev, Rx, Filter> From<EventBusError> for BusEventKind<Id, Ev, Rx, Filter> {
-    fn from(err: EventBusError) -> BusEventKind<Id, Ev, Rx, Filter> {
-        BusEventKind::Error(err)
-    }
-}
-
-#[derive(Clone)]
-pub struct BusEvent<Id, UserEvent, Rx, Filter> {
-    ts: DateTime<Utc>,
-    event: BusEventKind<Id, UserEvent, Rx, Filter>,
-}
-
-// TODO: create a BusEvent that wraps real Events and handles subscribe/etc
-#[derive(Clone)]
-pub enum BusEventKind<Id, UserEvent, Rx, Filter> {
-    Error(EventBusError),
-    UserEvent(UserEvent),
-    Subscribe { rx: Rx, filter: Filter },
-    Unsubscribe { sub_id: Id },
-}
-
-impl<Id, Ev, Rx, Filter> From<BusEventKind<Id, Ev, Rx, Filter>> for BusEvent<Id, Ev, Rx, Filter> {
-    fn from(bek: BusEventKind<Id, Ev, Rx, Filter>) -> BusEvent<Id, Ev, Rx, Filter> {
-        BusEvent {
-            ts: Utc::now(),
-            event: bek,
+impl<T: Clone + Debug + Send> PubSub<T> {
+    pub fn new(capacity: usize) -> Self {
+        let (tx, rx) = broadcast::channel(capacity);
+        Self {
+            topics: HashMap::new(),
+            events_rx: rx,
+            events_tx: tx,
+            capacity,
         }
     }
-}
-impl<Id, Ev, Rx, Filter> From<BusEvent<Id, Ev, Rx, Filter>> for BusEventKind<Id, Ev, Rx, Filter> {
-    fn from(be: BusEvent<Id, Ev, Rx, Filter>) -> BusEventKind<Id, Ev, Rx, Filter> {
-        be.event
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
-}
 
-// TODO: update to work with Arc<impl EventSender> and Arc<impl EventReceiver> instead of IDs
-//
+    pub fn channel(&self) -> broadcast::Sender<(String, T)> {
+        self.events_tx.clone()
+    }
 
-pub trait EventBus<Id, Rx, Tx, Kind, Event, Filter> {
-    // get a channel on which to send events
-    fn channel(&self) -> Tx;
+    pub fn subscribe(&mut self, topic: String) -> broadcast::Receiver<T> {
+        if let Some(tx) = self.topics.get(&topic) {
+            tx.subscribe()
+        } else {
+            let (tx, rx) = self
+                .create_topic(topic)
+                .expect("topic shouldn't have existed");
+            rx
+        }
+    }
 
-    /// subscribe a receiver to a sender for events matching a filter. Return an Id for the
-    /// subscription, which can be used later to unsubscribe
-    fn subscribe(&mut self, rx_id: Id, rx_ch: Tx, filter: Filter) -> Result<Id>;
+    fn create_topic(
+        &mut self,
+        topic: String,
+    ) -> Result<(broadcast::Sender<T>, broadcast::Receiver<T>)> {
+        if let Some(tx) = self.topics.get(&topic) {
+            return Err(PubSubError::TopicExists(topic))?;
+        }
 
-    /// unsubscribe a specific subscription
-    fn unsubscribe(&mut self, sub_id: Id) -> Result<()>;
+        let (tx, rx) = broadcast::channel(self.capacity);
+        self.topics.insert(topic, tx.clone());
+        Ok((tx, rx))
+    }
 
-    // drop all subscriptions for a given receiver
-    fn drop_rx(&mut self, rx_id: Id) -> Result<()>;
+    pub async fn run(&mut self) -> Result<()> {
+        while let Ok((topic, event)) = self.events_rx.recv().await {
+            if let Some(tx) = self.topics.get(&topic) {
+                match tx.send(event) {
+                    Ok(n) => {
+                        // on success, send returns number of receivers sent to.
+                        // nothing to do
+                    }
+                    Err(e) => {
+                        // An Err means there were no receivers
+                        // drop the topic
+                        self.topics.remove(&topic);
+                    }
+                }
+            } else {
+                // no topic for this event, therefore no subscribers. do nothing
+            }
+        }
 
-    /// when sink() is called, an EventBus will start to emit all events to that sink after normal
-    /// routing
-    fn sink(&mut self) -> Rx;
+        Ok(())
+    }
 }
