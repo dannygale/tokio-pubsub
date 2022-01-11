@@ -8,6 +8,7 @@ An extensible pub/sub message passing implementation built on top of tokio's `br
 - [ ] Dynamically add/remove subscribers 
 
 Future:
+- [ ] transparent publish, topic assigned at channel creation time
 - [ ] Rule-based filtering
 - [ ] Event transformations
 - [ ] In-band and out-of-band subscribe/unsubscribe

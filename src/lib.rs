@@ -75,11 +75,8 @@ impl<T: Clone + Debug + Send> PubSub<T> {
         loop {
             tokio::select! {
                 result = self.events_rx.recv() => {
-                    match result {
-                        Ok((topic, event)) => {
-                            self.process_event(topic, event).await;
-                        }
-                        _ => {},
+                    if let Ok((topic, event)) = result {
+                        self.process_event(topic, event).await;
                     }
                 },
                 _ = self.shutdown.recv() => {
