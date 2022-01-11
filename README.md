@@ -3,15 +3,14 @@
 An extensible pub/sub message passing implementation built on top of tokio's `broadcast` and `mpsc` channels
 
 ## Features
-- Publish/subscribe semantics (topics)
-- Dynamically add/remove subscribers 
-- Dynamically created topics
+- [X] Publish/subscribe semantics (topics)
+- [X] Dynamically created and pruned topics
+- [ ] Dynamically add/remove subscribers 
 
 Future:
-- Advanced rule-based filtering
-- Event transformations
-- In-band or out-of-band subscribe/unsubscribe
-- Extensible for decoupling to REST interfaces, etc.
+- [ ] Rule-based filtering
+- [ ] Event transformations
+- [ ] In-band and out-of-band subscribe/unsubscribe
 
 ## Getting Started
 
@@ -94,21 +93,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 TODO: User Guide
 
-## Design
+## Roadmap
+- [ ] Reimplement as a new type of channel instead of on top of broadcast channels
+- [ ] Filter all events: `bus.filter(|e| f(e)).subscribe()`
+- [ ] Pre-filter events on a topic: `bus.topic(topic_name).filter(|e| f(e)).subscribe()`
+- [ ] Transform events: `bus.transform(|e| f(e))`
 
-The central message bus has a `sync::mpsc` channel which publishers use to submit a `message` to a `topic`. The bus
-holds a `sync::broadcast` channel for each `topic`
-
-Subscriptions are created using the builder pattern. There are several ways to subscribe to a PubSub bus:
-- Receive all events: `bus.subscribe()` 
-- Receive all events on a topic: `bus.topic(topic_name).subscribe()`
- 
-### Future:
-    - Filter all events: `bus.filter(|e| f(e)).subscribe()`
-    - Pre-filter events on a topic: `bus.topic(topic_name).filter(|e| f(e)).subscribe()`
-    - Transform events: `bus.transform(|e| f(e))`
-
-    - You can apply a `filter` to the bus as a whole or to a `topic`. You can apply a `transform` to the whole bus, a
-      `topic`or a `filter`ed bus/`topic`. 
-    - The `filter` closures accept an `Event` and return `bool` to indicate whether to pass the event or not
-    - The `transform` closures accept an `Event` and return Result<`Event`>
+- [ ] You can apply a `filter` to the bus as a whole or to a `topic`. You can apply a `transform` to the whole bus, a
+  `topic` or a `filter`ed bus/`topic`. 
+- [ ] The `filter` closures accept an `Event` and return `bool` to indicate whether to pass the event or not
+- [ ] The `transform` closures accept an `Event` and return Result<`Event`>
