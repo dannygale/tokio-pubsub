@@ -29,12 +29,12 @@ pub mod error {
 }
 use error::{RecvError, SendError};
 
-pub struct Sender<T> {
+pub struct Publisher<T> {
     topic: Option<String>,
     tx: broadcast::Sender<(String, T)>,
 }
 
-impl<T: Send> Sender<T> {
+impl<T: Send> Publisher<T> {
     pub(crate) fn new(tx: broadcast::Sender<(String, T)>) -> Self {
         Self { topic: None, tx }
     }
@@ -63,12 +63,12 @@ impl<T: Send> Sender<T> {
     }
 }
 
-pub struct Receiver<T> {
+pub struct Subscriber<T> {
     map: StreamMap<String, Pin<Box<dyn Stream<Item = T> + Send>>>,
     phantom: PhantomData<T>,
 }
 
-impl<T: Send + Clone> Receiver<T> {
+impl<T: Send + Clone> Subscriber<T> {
     pub fn new() -> Self {
         Self {
             map: StreamMap::new(),
