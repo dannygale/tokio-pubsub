@@ -4,9 +4,12 @@ use std::fmt::Debug;
 use thiserror::Error;
 use tokio::{
     self,
-    sync::{broadcast, oneshot},
+    sync::broadcast,
     time::{sleep, Duration},
 };
+
+mod sender_receiver;
+use sender_receiver::{Receiver, Sender};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -80,6 +83,7 @@ impl<T: Clone + Debug + Send> PubSub<T> {
                     }
                 },
                 _ = self.shutdown.recv() => {
+                    // TODO: propagate to receivers
                     sleep(Duration::from_millis(100)).await;
                     return
                 }
