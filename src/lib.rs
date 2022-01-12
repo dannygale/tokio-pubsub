@@ -8,8 +8,8 @@ use tokio::{
     time::{sleep, Duration},
 };
 
-mod sender_receiver;
-use sender_receiver::{Receiver, Sender};
+mod publisher_subscriber;
+use publisher_subscriber::{Publisher, Subscriber};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
