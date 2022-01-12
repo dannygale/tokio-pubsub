@@ -11,6 +11,7 @@ repository = "github.com/dannygale/tokio-pubsub/"
 [dependencies]
 thiserror = "1.0.30"
 tokio = { version = "1.15.0", features = [ "full" ]}
+tokio-stream = "0.1.8"
 
 [dev-dependencies]
 tokio-test = "0.4.2"
