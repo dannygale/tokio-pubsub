@@ -16,13 +16,6 @@ Future:
 ## Getting Started
 
 ```rust
-enum ApolloEvent {
-    Ignition,
-    Liftoff,
-    EagleHasLanded,
-    HoustonWeHaveAProblem,
-}
-
 #[tokio::main]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[derive(Debug, Clone, Eq, PartialEq)]
