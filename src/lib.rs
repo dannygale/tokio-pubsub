@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::hash::Hash;
 
 use thiserror::Error;
 use tokio::{
@@ -16,21 +17,25 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Error, Debug)]
 pub enum PubSubError {
     #[error("this topic already exists")]
-    TopicExists(String),
+    TopicExists,
 }
 
-struct PubSub<T> {
-    topics: HashMap<String, broadcast::Sender<T>>,
+struct PubSub<Topic, Event> {
+    topics: HashMap<Topic, broadcast::Sender<Event>>,
 
-    events_rx: broadcast::Receiver<(String, T)>,
-    events_tx: broadcast::Sender<(String, T)>,
+    events_rx: broadcast::Receiver<(Topic, Event)>,
+    events_tx: broadcast::Sender<(Topic, Event)>,
 
     shutdown: broadcast::Receiver<()>,
 
     capacity: usize,
 }
 
-impl<T: Clone + Debug + Send> PubSub<T> {
+impl<Topic, Event> PubSub<Topic, Event>
+where
+    Topic: Clone + Debug + Eq + Hash,
+    Event: Clone + Debug + Send,
+{
     pub fn new(capacity: usize, shutdown: broadcast::Receiver<()>) -> Self {
         let (tx, rx) = broadcast::channel(capacity);
         Self {
@@ -46,16 +51,16 @@ impl<T: Clone + Debug + Send> PubSub<T> {
         self.capacity
     }
 
-    pub fn channel(&self) -> broadcast::Sender<(String, T)> {
+    pub fn channel(&self) -> broadcast::Sender<(Topic, Event)> {
         self.events_tx.clone()
     }
 
-    pub fn subscribe(&mut self, topic: &str) -> broadcast::Receiver<T> {
-        if let Some(tx) = self.topics.get(topic) {
+    pub fn subscribe(&mut self, topic: Topic) -> broadcast::Receiver<Event> {
+        if let Some(tx) = self.topics.get(&topic) {
             tx.subscribe()
         } else {
             let (tx, rx) = self
-                .create_topic(topic.to_owned())
+                .create_topic(topic)
                 .expect("topic shouldn't have existed");
             rx
         }
@@ -63,10 +68,10 @@ impl<T: Clone + Debug + Send> PubSub<T> {
 
     fn create_topic(
         &mut self,
-        topic: String,
-    ) -> Result<(broadcast::Sender<T>, broadcast::Receiver<T>)> {
+        topic: Topic,
+    ) -> Result<(broadcast::Sender<Event>, broadcast::Receiver<Event>)> {
         if let Some(tx) = self.topics.get(&topic) {
-            return Err(PubSubError::TopicExists(topic))?;
+            return Err(PubSubError::TopicExists)?;
         }
 
         let (tx, rx) = broadcast::channel(self.capacity);
@@ -79,7 +84,7 @@ impl<T: Clone + Debug + Send> PubSub<T> {
             tokio::select! {
                 result = self.events_rx.recv() => {
                     if let Ok((topic, event)) = result {
-                        self.process_event(topic, event).await;
+                        self.process_event(&topic, event).await;
                     }
                 },
                 _ = self.shutdown.recv() => {
@@ -91,8 +96,8 @@ impl<T: Clone + Debug + Send> PubSub<T> {
         }
     }
 
-    async fn process_event(&mut self, topic: String, event: T) {
-        if let Some(tx) = self.topics.get(&topic) {
+    async fn process_event(&mut self, topic: &Topic, event: Event) {
+        if let Some(tx) = self.topics.get(topic) {
             match tx.send(event) {
                 Ok(n) => {
                     // on success, send returns number of receivers sent to.
@@ -101,7 +106,7 @@ impl<T: Clone + Debug + Send> PubSub<T> {
                 Err(e) => {
                     // An Err means there were no receivers
                     // drop the topic
-                    self.topics.remove(&topic);
+                    self.topics.remove(topic);
                 }
             }
         } else {
@@ -118,9 +123,9 @@ mod tests {
     #[tokio::test]
     async fn sub_recv_event() {
         let (stx, srx) = broadcast::channel(1);
-        let mut bus = PubSub::<usize>::new(1, srx);
+        let mut bus = PubSub::<String, usize>::new(1, srx);
 
-        let mut sub1 = bus.subscribe("topic1");
+        let mut sub1 = bus.subscribe("topic1".into());
         let pub1 = bus.channel();
         tokio::spawn(async move { bus.run().await });
 
@@ -141,9 +146,9 @@ mod tests {
     #[tokio::test]
     async fn sub_recv_multiple_events() {
         let (stx, srx) = broadcast::channel(1);
-        let mut bus = PubSub::<usize>::new(1, srx);
+        let mut bus = PubSub::<String, usize>::new(1, srx);
 
-        let mut sub1 = bus.subscribe("topic1");
+        let mut sub1 = bus.subscribe("topic1".into());
         let pub1 = bus.channel();
         tokio::spawn(async move { bus.run().await });
 
@@ -163,9 +168,9 @@ mod tests {
     #[tokio::test]
     async fn sub_recv_queued_events() {
         let (stx, srx) = broadcast::channel(1);
-        let mut bus = PubSub::<usize>::new(16, srx);
+        let mut bus = PubSub::<String, usize>::new(16, srx);
 
-        let mut sub1 = bus.subscribe("topic1");
+        let mut sub1 = bus.subscribe("topic1".into());
         let pub1 = bus.channel();
         tokio::spawn(async move { bus.run().await });
 
@@ -186,10 +191,10 @@ mod tests {
     #[tokio::test]
     async fn subs_recv_single_event() {
         let (stx, srx) = broadcast::channel(1);
-        let mut bus = PubSub::<usize>::new(1, srx);
+        let mut bus = PubSub::<String, usize>::new(1, srx);
 
-        let mut sub1 = bus.subscribe("topic1");
-        let mut sub2 = bus.subscribe("topic1");
+        let mut sub1 = bus.subscribe("topic1".into());
+        let mut sub2 = bus.subscribe("topic1".into());
         let pub1 = bus.channel();
         tokio::spawn(async move { bus.run().await });
 
@@ -208,10 +213,10 @@ mod tests {
     #[tokio::test]
     async fn subs_recv_multiple_events() {
         let (stx, srx) = broadcast::channel(1);
-        let mut bus = PubSub::<usize>::new(1, srx);
+        let mut bus = PubSub::<String, usize>::new(1, srx);
 
-        let mut sub1 = bus.subscribe("topic1");
-        let mut sub2 = bus.subscribe("topic1");
+        let mut sub1 = bus.subscribe("topic1".into());
+        let mut sub2 = bus.subscribe("topic1".into());
         let pub1 = bus.channel();
         tokio::spawn(async move { bus.run().await });
 
@@ -233,10 +238,10 @@ mod tests {
     #[tokio::test]
     async fn subs_recv_multiple_queued_events() {
         let (stx, srx) = broadcast::channel(1);
-        let mut bus = PubSub::<usize>::new(16, srx);
+        let mut bus = PubSub::<String, usize>::new(16, srx);
 
-        let mut sub1 = bus.subscribe("topic1");
-        let mut sub2 = bus.subscribe("topic1");
+        let mut sub1 = bus.subscribe("topic1".into());
+        let mut sub2 = bus.subscribe("topic1".into());
         let pub1 = bus.channel();
         tokio::spawn(async move { bus.run().await });
 
@@ -261,9 +266,9 @@ mod tests {
     #[tokio::test]
     async fn sub_recv_multiple_pubs() {
         let (stx, srx) = broadcast::channel(1);
-        let mut bus = PubSub::<usize>::new(16, srx);
+        let mut bus = PubSub::<String, usize>::new(16, srx);
 
-        let mut sub1 = bus.subscribe("topic1");
+        let mut sub1 = bus.subscribe("topic1".into());
         let pub1 = bus.channel();
         let pub2 = bus.channel();
         tokio::spawn(async move { bus.run().await });
@@ -301,13 +306,13 @@ mod tests {
         }
 
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        let mut bus = PubSub::new(16, shutdown_rx);
+        let mut bus = PubSub::<String, ApolloEvent>::new(16, shutdown_rx);
 
         let apollo11 = bus.channel();
         let apollo13 = bus.channel();
 
-        let mut houston1 = bus.subscribe("apollo11");
-        let mut houston2 = bus.subscribe("apollo13");
+        let mut houston1 = bus.subscribe("apollo11".into());
+        let mut houston2 = bus.subscribe("apollo13".into());
 
         tokio::spawn(async move { bus.run().await });
 
