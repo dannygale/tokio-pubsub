@@ -62,10 +62,6 @@ pub enum BusEvent<Topic> {
     PreprocessorCleared,
 
     ControlChannelCreated,
-    //SubscribeReceived(Topic),
-    //DropTopicReceived(Topic),
-    //SetPreprocessorReceived,
-    //ClearPreprocessorReceived,
 }
 
 struct TopicInfo<Event> {
