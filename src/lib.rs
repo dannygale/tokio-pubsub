@@ -5,7 +5,7 @@ use std::hash::Hash;
 use thiserror::Error;
 use tokio::{
     self,
-    sync::broadcast,
+    sync::{broadcast, mpsc},
     time::{sleep, Duration},
 };
 
@@ -23,8 +23,8 @@ pub enum PubSubError {
 struct PubSub<Topic, Event> {
     topics: HashMap<Topic, broadcast::Sender<Event>>,
 
-    events_rx: broadcast::Receiver<(Topic, Event)>,
-    events_tx: broadcast::Sender<(Topic, Event)>,
+    events_rx: mpsc::Receiver<(Topic, Event)>,
+    events_tx: mpsc::Sender<(Topic, Event)>,
 
     shutdown: broadcast::Receiver<()>,
 
@@ -37,7 +37,7 @@ where
     Event: Clone + Debug + Send,
 {
     pub fn new(capacity: usize, shutdown: broadcast::Receiver<()>) -> Self {
-        let (tx, rx) = broadcast::channel(capacity);
+        let (tx, rx) = mpsc::channel(capacity);
         Self {
             topics: HashMap::new(),
             events_rx: rx,
@@ -51,7 +51,7 @@ where
         self.capacity
     }
 
-    pub fn channel(&self) -> broadcast::Sender<(Topic, Event)> {
+    pub fn channel(&self) -> mpsc::Sender<(Topic, Event)> {
         self.events_tx.clone()
     }
 
@@ -83,7 +83,7 @@ where
         loop {
             tokio::select! {
                 result = self.events_rx.recv() => {
-                    if let Ok((topic, event)) = result {
+                    if let Some((topic, event)) = result {
                         self.process_event(&topic, event).await;
                     }
                 },
@@ -131,6 +131,7 @@ mod tests {
         let send_event = 123;
         println!("sending 123");
         pub1.send(("topic1".into(), send_event.clone()))
+            .await
             .expect("couldn't send");
 
         println!("awaiting sub1.recv()");
@@ -154,6 +155,7 @@ mod tests {
         let send_events = vec![123, 456, 789];
         for e in send_events.iter() {
             pub1.send(("topic1".into(), e.clone()))
+                .await
                 .expect("couldn't send");
 
             let recv = sub1.recv().await.unwrap();
@@ -176,6 +178,7 @@ mod tests {
         let send_events = vec![123, 456, 789];
         for e in send_events.iter() {
             pub1.send(("topic1".into(), e.clone()))
+                .await
                 .expect("couldn't send");
         }
 
@@ -199,6 +202,7 @@ mod tests {
 
         let send_event = 123;
         pub1.send(("topic1".into(), send_event.clone()))
+            .await
             .expect("couldn't send");
 
         let event = sub1.recv().await.unwrap();
@@ -222,6 +226,7 @@ mod tests {
         let send_events = vec![123, 456, 789];
         for e in send_events.iter() {
             pub1.send(("topic1".into(), e.clone()))
+                .await
                 .expect("couldn't send");
 
             let recv = sub1.recv().await.unwrap();
@@ -247,6 +252,7 @@ mod tests {
         let send_events = vec![123, 456, 789];
         for e in send_events.iter() {
             pub1.send(("topic1".into(), e.clone()))
+                .await
                 .expect("couldn't send");
         }
 
@@ -276,8 +282,10 @@ mod tests {
 
         for e in send_events.iter() {
             pub1.send(("topic1".into(), e.clone()))
+                .await
                 .expect("couldn't send");
             pub2.send(("topic1".into(), e.clone()))
+                .await
                 .expect("couldn't send");
         }
 
@@ -317,22 +325,28 @@ mod tests {
 
         apollo11
             .send(("apollo11".into(), ApolloEvent::Ignition))
+            .await
             .unwrap();
         apollo11
             .send(("apollo11".into(), ApolloEvent::Liftoff))
+            .await
             .unwrap();
         apollo11
             .send(("apollo11".into(), ApolloEvent::EagleHasLanded))
+            .await
             .unwrap();
 
         apollo13
             .send(("apollo13".into(), ApolloEvent::Ignition))
+            .await
             .unwrap();
         apollo13
             .send(("apollo13".into(), ApolloEvent::Liftoff))
+            .await
             .unwrap();
         apollo13
             .send(("apollo13".into(), ApolloEvent::HoustonWeHaveAProblem))
+            .await
             .unwrap();
 
         let mut srx = shutdown_tx.subscribe();
