@@ -71,7 +71,7 @@ where
             loop {
                 while let Some(event) = rx.recv().await {
                     let t = topic.clone();
-                    tx.send((t, event)).await;
+                    let _ = tx.send((t, event)).await;
                 }
             }
         });
@@ -101,6 +101,10 @@ where
         let (tx, rx) = broadcast::channel(self.capacity);
         self.topics_tx.insert(topic, tx.clone());
         Ok((tx, rx))
+    }
+
+    fn drop_topic(&mut self, topic: &Topic) {
+        self.topics_tx.remove(topic);
     }
 
     pub async fn run(&mut self) {
@@ -136,7 +140,7 @@ where
                 Err(_e) => {
                     // An Err means there were no receivers
                     // drop the topic
-                    self.topics_tx.remove(topic);
+                    self.drop_topic(topic)
                 }
             }
         } else {
@@ -144,7 +148,7 @@ where
         }
     }
 
-    pub fn preprocess(&mut self, f: Preproc<Event>) {
+    pub fn set_preprocessor(&mut self, f: Preproc<Event>) {
         self.preproc = Some(f);
     }
 }
@@ -163,17 +167,13 @@ mod tests {
         tokio::spawn(async move { bus.run().await });
 
         let send_event = 123;
-        println!("sending 123");
         pub1.send(("topic1".into(), send_event.clone()))
             .await
             .expect("couldn't send");
 
-        println!("awaiting sub1.recv()");
         let event = sub1.recv().await.unwrap();
-        println!("checking equality");
         assert_eq!(event, send_event);
 
-        println!("sending shutdown");
         stx.send(()).unwrap();
     }
 
@@ -196,7 +196,6 @@ mod tests {
             assert_eq!(e, &recv);
         }
 
-        println!("sending shutdown");
         stx.send(()).unwrap();
     }
 
@@ -269,7 +268,6 @@ mod tests {
             assert_eq!(e, &recv);
         }
 
-        println!("sending shutdown");
         stx.send(()).unwrap();
     }
 
