@@ -9,6 +9,7 @@ repository = "github.com/dannygale/tokio-pubsub/"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+dashmap = "5.0.0"
 thiserror = "1.0.30"
 tokio = { version = "1.15.0", features = [ "full" ]}
 tokio-stream = "0.1.8"
