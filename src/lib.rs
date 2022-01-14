@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 //use dashmap::DashMap;
 use thiserror::Error;
@@ -42,7 +43,7 @@ pub enum BusControl<Topic, Event> {
 pub enum BusEvent<Topic> {
     SubscriberCreated(Topic),
     // TODO: SubscriberDropped
-    SubscriberDropped(Topic),
+    SubscribersDropped(Topic, usize),
 
     PublisherCreated,
     BoundPublisherCreated(Topic),
@@ -59,11 +60,27 @@ pub enum BusEvent<Topic> {
     //SentEventToTopic(Topic, Event),
     PreprocessorSet,
     PreprocessorCleared,
+
+    ControlChannelCreated,
 }
 
-struct PubSub<Topic, Event> {
+struct TopicInfo<Event> {
+    sender: broadcast::Sender<Event>,
+    subscribers: AtomicUsize,
+}
+
+impl<Event> TopicInfo<Event> {
+    pub fn new(sender: broadcast::Sender<Event>) -> Self {
+        Self {
+            sender,
+            subscribers: AtomicUsize::new(0),
+        }
+    }
+}
+
+pub struct PubSub<Topic, Event> {
     // subscriber channels
-    topics_tx: HashMap<Topic, broadcast::Sender<Event>>,
+    topics_tx: HashMap<Topic, TopicInfo<Event>>,
 
     // main incoming event bus
     events_tx: mpsc::Sender<(Topic, Event)>,
@@ -133,6 +150,11 @@ where
         self.capacity
     }
 
+    pub fn control_channel(&self) -> mpsc::Sender<BusControl<Topic, Event>> {
+        self.meta(BusEvent::ControlChannelCreated);
+        self.control_tx.clone()
+    }
+
     pub fn channel(&self) -> mpsc::Sender<(Topic, Event)> {
         self.meta(BusEvent::PublisherCreated);
         self.events_tx.clone()
@@ -159,10 +181,18 @@ where
         ext_tx
     }
 
+    pub fn subscribe_meta(&self) -> broadcast::Receiver<BusEvent<Topic>> {
+        self.meta_tx.subscribe()
+    }
+
+    pub fn subscribe_sink(&self) -> broadcast::Receiver<Event> {
+        self.sink_tx.subscribe()
+    }
+
     pub fn subscribe(&mut self, topic: Topic) -> broadcast::Receiver<Event> {
         if let Some(tx) = self.topics_tx.get(&topic) {
             self.meta(BusEvent::SubscriberCreated(topic.clone()));
-            tx.subscribe()
+            tx.sender.subscribe()
         } else {
             let (_tx, rx) = self
                 .create_topic(topic.clone())
@@ -182,7 +212,8 @@ where
         }
 
         let (tx, rx) = broadcast::channel(self.capacity);
-        self.topics_tx.insert(topic.clone(), tx.clone());
+        let topic_info = TopicInfo::new(tx.clone());
+        self.topics_tx.insert(topic.clone(), topic_info);
         self.meta(BusEvent::TopicCreated(topic));
         Ok((tx, rx))
     }
@@ -247,9 +278,13 @@ where
     async fn process_event(&mut self, topic: &Topic, event: Event) {
         self.sink(event.clone());
         if let Some(tx) = self.topics_tx.get(topic) {
-            match tx.send(event) {
-                Ok(_n) => {
+            match tx.sender.send(event) {
+                Ok(n) => {
                     // on success, send returns number of receivers sent to.
+                    if tx.subscribers.load(Ordering::Relaxed) != n {
+                        self.meta(BusEvent::SubscribersDropped(topic.clone(), n));
+                        tx.subscribers.store(n, Ordering::Relaxed);
+                    }
                     // nothing to do
                 }
                 Err(_e) => {
