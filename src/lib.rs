@@ -6,7 +6,7 @@ use std::hash::Hash;
 use thiserror::Error;
 use tokio::{
     self,
-    sync::{broadcast, mpsc},
+    sync::{broadcast, mpsc, oneshot},
     time::{sleep, Duration},
 };
 
@@ -24,14 +24,70 @@ pub enum PubSubError {
     TopicExists,
 }
 
+pub enum BusControl<Topic, Event> {
+    Subscribe {
+        topic: Topic,
+        respond_to: oneshot::Sender<broadcast::Receiver<Event>>,
+    },
+    DropTopic {
+        topic: Topic,
+    },
+    SetPreprocessor {
+        preproc: Preproc<Event>,
+    },
+    ClearPreprocessor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum BusEvent<Topic> {
+    SubscriberCreated(Topic),
+    // TODO: SubscriberDropped
+    SubscriberDropped(Topic),
+
+    PublisherCreated,
+    BoundPublisherCreated(Topic),
+    // TODO: PublisherDropped
+    PublisherDropped,
+
+    TopicCreated(Topic),
+    TopicDropped(Topic),
+    NoSubscribers(Topic),
+
+    ShutdownReceived,
+    //ReceivedUserEvent(Event),
+    //PreprocessedEvent(Event, Event),
+    //SentEventToTopic(Topic, Event),
+    PreprocessorSet,
+    PreprocessorCleared,
+}
+
 struct PubSub<Topic, Event> {
+    // subscriber channels
     topics_tx: HashMap<Topic, broadcast::Sender<Event>>,
 
-    events_rx: mpsc::Receiver<(Topic, Event)>,
+    // main incoming event bus
     events_tx: mpsc::Sender<(Topic, Event)>,
+    events_rx: mpsc::Receiver<(Topic, Event)>,
 
+    // receive a shutdown signal
+    // this may be unnecessary -- if all senders to events_rx drop, run will return
+    // however, self holds the events_tx sender. How do I handle that?
     shutdown: broadcast::Receiver<()>,
 
+    // channel for receiving control messages
+    control_tx: mpsc::Sender<BusControl<Topic, Event>>,
+    control_rx: mpsc::Receiver<BusControl<Topic, Event>>,
+
+    // channel for emitting bus events
+    meta_tx: broadcast::Sender<BusEvent<Topic>>,
+    meta_rx: broadcast::Receiver<BusEvent<Topic>>,
+
+    // sink all user events
+    sink_tx: broadcast::Sender<Event>,
+    sink_rx: broadcast::Receiver<Event>,
+
+    // optional event preprocessor
+    // eg - to sequence events
     preproc: Option<Preproc<Event>>,
 
     capacity: usize,
@@ -43,15 +99,34 @@ where
     Event: Clone + Debug + Send + 'static,
 {
     pub fn new(capacity: usize, shutdown: broadcast::Receiver<()>) -> Self {
-        let (tx, rx) = mpsc::channel(capacity);
+        let (events_tx, events_rx) = mpsc::channel(capacity);
+        let (control_tx, control_rx) = mpsc::channel(capacity);
+        let (meta_tx, meta_rx) = broadcast::channel(capacity);
+        let (sink_tx, sink_rx) = broadcast::channel(capacity);
+
         Self {
             topics_tx: HashMap::new(),
-            events_rx: rx,
-            events_tx: tx,
+
+            events_tx,
+            events_rx,
+            control_tx,
+            control_rx,
+            meta_tx,
+            meta_rx,
+            sink_tx,
+            sink_rx,
+
             shutdown,
             preproc: None,
             capacity,
         }
+    }
+
+    fn meta(&self, event: BusEvent<Topic>) {
+        let _ = self.meta_tx.send(event.clone());
+    }
+    fn sink(&self, event: Event) {
+        let _ = self.sink_tx.send(event);
     }
 
     pub fn capacity(&self) -> usize {
@@ -59,33 +134,41 @@ where
     }
 
     pub fn channel(&self) -> mpsc::Sender<(Topic, Event)> {
+        self.meta(BusEvent::PublisherCreated);
         self.events_tx.clone()
     }
 
-    pub fn bound_sender(&self, topic: Topic) -> mpsc::Sender<Event> {
+    pub async fn bound_channel(&self, topic: Topic) -> mpsc::Sender<Event> {
         let (ext_tx, mut rx) = mpsc::channel(self.capacity());
 
-        // aggregate events onto the main events_rx mpsc receiver
+        let t = topic.clone();
+        // aggregate events onto the main events_rx mpsc receiver, pre-filling the topic
         let tx = self.events_tx.clone();
         tokio::spawn(async move {
             loop {
                 while let Some(event) = rx.recv().await {
-                    let t = topic.clone();
-                    let _ = tx.send((t, event)).await;
+                    let send_topic = t.clone();
+                    // ignore the result
+                    let _ = tx.send((send_topic, event)).await;
                 }
+                // if we get out of the while loop, the external sender dropped and we're done
             }
         });
 
+        self.meta(BusEvent::BoundPublisherCreated(topic));
         ext_tx
     }
 
     pub fn subscribe(&mut self, topic: Topic) -> broadcast::Receiver<Event> {
         if let Some(tx) = self.topics_tx.get(&topic) {
+            self.meta(BusEvent::SubscriberCreated(topic.clone()));
             tx.subscribe()
         } else {
             let (_tx, rx) = self
-                .create_topic(topic)
+                .create_topic(topic.clone())
                 .expect("topic shouldn't have existed");
+            self.meta(BusEvent::TopicCreated(topic.clone()));
+            self.meta(BusEvent::SubscriberCreated(topic.clone()));
             rx
         }
     }
@@ -99,11 +182,13 @@ where
         }
 
         let (tx, rx) = broadcast::channel(self.capacity);
-        self.topics_tx.insert(topic, tx.clone());
+        self.topics_tx.insert(topic.clone(), tx.clone());
+        self.meta(BusEvent::TopicCreated(topic));
         Ok((tx, rx))
     }
 
     fn drop_topic(&mut self, topic: &Topic) {
+        self.meta(BusEvent::TopicDropped(topic.clone()));
         self.topics_tx.remove(topic);
     }
 
@@ -112,11 +197,23 @@ where
             tokio::select! {
                 result = self.events_rx.recv() => {
                     if let Some((topic, event)) = result {
+                        let event = self.preprocess_event(event);
                         self.process_event(&topic, event).await;
+                    } else {
+                        // this should never trigger because self holds a sender
+                        unreachable!();
                     }
                 },
+                result = self.control_rx.recv() => {
+                    if let Some(ctl_msg) = result {
+                        self.process_control_message(ctl_msg);
+                    } else {
+                        unreachable!();
+                    }
+                }
                 _ = self.shutdown.recv() => {
                     // TODO: propagate to receivers
+                    self.meta(BusEvent::ShutdownReceived);
                     sleep(Duration::from_millis(100)).await;
                     return
                 }
@@ -124,13 +221,31 @@ where
         }
     }
 
-    async fn process_event(&mut self, topic: &Topic, event: Event) {
-        let event = if let Some(ref func) = self.preproc {
-            func(event)
+    #[inline]
+    fn preprocess_event(&self, event: Event) -> Event {
+        if let Some(ref func) = self.preproc {
+            let new_event = func(event.clone());
+            //self.meta(BusEvent::PreprocessedEvent(event, new_event.clone()));
+            new_event
         } else {
             event
-        };
+        }
+    }
 
+    fn process_control_message(&mut self, msg: BusControl<Topic, Event>) {
+        match msg {
+            BusControl::Subscribe { topic, respond_to } => {
+                let rx = self.subscribe(topic);
+                let _ = respond_to.send(rx);
+            }
+            BusControl::DropTopic { topic } => self.drop_topic(&topic),
+            BusControl::SetPreprocessor { preproc } => self.set_preprocessor(preproc),
+            BusControl::ClearPreprocessor => self.clear_preprocessor(),
+        }
+    }
+
+    async fn process_event(&mut self, topic: &Topic, event: Event) {
+        self.sink(event.clone());
         if let Some(tx) = self.topics_tx.get(topic) {
             match tx.send(event) {
                 Ok(_n) => {
@@ -145,11 +260,18 @@ where
             }
         } else {
             // no topic for this event, therefore no subscribers. do nothing
+            self.meta(BusEvent::NoSubscribers(topic.clone()));
         }
     }
 
     pub fn set_preprocessor(&mut self, f: Preproc<Event>) {
         self.preproc = Some(f);
+        self.meta(BusEvent::PreprocessorSet);
+    }
+
+    pub fn clear_preprocessor(&mut self) {
+        self.preproc = None;
+        self.meta(BusEvent::PreprocessorCleared);
     }
 }
 

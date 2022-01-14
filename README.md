@@ -8,10 +8,10 @@ An extensible pub/sub message passing implementation built on top of tokio's `br
 - [X] Struct-based publishers and subscribers that wrap broadcast channels
 - [X] "bound publish" -- topic assigned at publisher creation time
 - [X] Preprocess events
-- [ ] add support for serde 
-- [ ] Dynamically add/remove subscribers
+- [X] Dynamically add/remove subscribers
+- [X] out-of-band subscribe/unsubscribe
 - [ ] In-band subscribe/unsubscribe
-- [ ] out-of-band subscribe/unsubscribe
+- [ ] add support for serde 
 - [ ] Transform events - apply to topic, subscriber, or by closure
 - [ ] Filter events per subscriber by closure
 - [ ] Chain Filters and Transformations
