@@ -10,7 +10,7 @@ use tokio::{
 };
 
 mod publisher_subscriber;
-use publisher_subscriber::{Publisher, Subscriber};
+pub use publisher_subscriber::{Publisher, Subscriber};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -59,7 +59,7 @@ where
         if let Some(tx) = self.topics.get(&topic) {
             tx.subscribe()
         } else {
-            let (tx, rx) = self
+            let (_tx, rx) = self
                 .create_topic(topic)
                 .expect("topic shouldn't have existed");
             rx
@@ -70,7 +70,7 @@ where
         &mut self,
         topic: Topic,
     ) -> Result<(broadcast::Sender<Event>, broadcast::Receiver<Event>)> {
-        if let Some(tx) = self.topics.get(&topic) {
+        if let Some(_tx) = self.topics.get(&topic) {
             return Err(PubSubError::TopicExists)?;
         }
 
@@ -99,11 +99,11 @@ where
     async fn process_event(&mut self, topic: &Topic, event: Event) {
         if let Some(tx) = self.topics.get(topic) {
             match tx.send(event) {
-                Ok(n) => {
+                Ok(_n) => {
                     // on success, send returns number of receivers sent to.
                     // nothing to do
                 }
-                Err(e) => {
+                Err(_e) => {
                     // An Err means there were no receivers
                     // drop the topic
                     self.topics.remove(topic);
@@ -118,7 +118,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio_test;
 
     #[tokio::test]
     async fn sub_recv_event() {
@@ -140,7 +139,7 @@ mod tests {
         assert_eq!(event, send_event);
 
         println!("sending shutdown");
-        stx.send(());
+        stx.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -162,7 +161,7 @@ mod tests {
         }
 
         println!("sending shutdown");
-        stx.send(());
+        stx.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -185,7 +184,7 @@ mod tests {
             assert_eq!(e, &recv);
         }
 
-        stx.send(());
+        stx.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -207,7 +206,7 @@ mod tests {
         let event = sub2.recv().await.unwrap();
         assert_eq!(event, send_event);
 
-        stx.send(());
+        stx.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -232,7 +231,7 @@ mod tests {
         }
 
         println!("sending shutdown");
-        stx.send(());
+        stx.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -260,7 +259,7 @@ mod tests {
             assert_eq!(e, &recv);
         }
 
-        stx.send(());
+        stx.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -273,7 +272,7 @@ mod tests {
         let pub2 = bus.channel();
         tokio::spawn(async move { bus.run().await });
 
-        let mut send_events = vec![123, 456, 789];
+        let send_events = vec![123, 456, 789];
 
         for e in send_events.iter() {
             pub1.send(("topic1".into(), e.clone()))
@@ -286,13 +285,13 @@ mod tests {
         all_events.append(&mut send_events.clone());
 
         let mut recv_events = vec![];
-        for e in all_events.iter() {
+        for _e in all_events.iter() {
             recv_events.push(sub1.recv().await.unwrap());
         }
         all_events.sort();
         recv_events.sort();
 
-        stx.send(());
+        stx.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -316,13 +315,25 @@ mod tests {
 
         tokio::spawn(async move { bus.run().await });
 
-        apollo11.send(("apollo11".into(), ApolloEvent::Ignition));
-        apollo11.send(("apollo11".into(), ApolloEvent::Liftoff));
-        apollo11.send(("apollo11".into(), ApolloEvent::EagleHasLanded));
+        apollo11
+            .send(("apollo11".into(), ApolloEvent::Ignition))
+            .unwrap();
+        apollo11
+            .send(("apollo11".into(), ApolloEvent::Liftoff))
+            .unwrap();
+        apollo11
+            .send(("apollo11".into(), ApolloEvent::EagleHasLanded))
+            .unwrap();
 
-        apollo13.send(("apollo13".into(), ApolloEvent::Ignition));
-        apollo13.send(("apollo13".into(), ApolloEvent::Liftoff));
-        apollo13.send(("apollo13".into(), ApolloEvent::HoustonWeHaveAProblem));
+        apollo13
+            .send(("apollo13".into(), ApolloEvent::Ignition))
+            .unwrap();
+        apollo13
+            .send(("apollo13".into(), ApolloEvent::Liftoff))
+            .unwrap();
+        apollo13
+            .send(("apollo13".into(), ApolloEvent::HoustonWeHaveAProblem))
+            .unwrap();
 
         let mut srx = shutdown_tx.subscribe();
         let apollo_future = tokio::spawn(async move {
@@ -337,7 +348,7 @@ mod tests {
             }
         });
         sleep(Duration::from_millis(100)).await;
-        shutdown_tx.send(());
+        shutdown_tx.send(()).unwrap();
 
         let (apollo11_events, apollo13_events) = apollo_future.await.unwrap();
 

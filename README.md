@@ -5,13 +5,14 @@ An extensible pub/sub message passing implementation built on top of tokio's `br
 ## Features
 - [X] Publish/subscribe semantics (topics)
 - [X] Dynamically created and pruned topics
+- [X] Struct-based publishers and subscribers that wrap broadcast channels
+- [ ] add support for serde 
 - [ ] Dynamically add/remove subscribers 
-
-Future:
-- [ ] transparent publish, topic assigned at channel creation time
-- [ ] Rule-based filtering
-- [ ] Event transformations
+- [ ] transparent publish -- topic assigned at channel creation time
+- [ ] Transform events
+- [ ] Filter events
 - [ ] In-band and out-of-band subscribe/unsubscribe
+- [ ] Reimplement as a new type of channel instead of on top of broadcast channels
 
 ## Getting Started
 
@@ -87,13 +88,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 TODO: User Guide
 
-## Roadmap
-- [ ] Reimplement as a new type of channel instead of on top of broadcast channels
-- [ ] Filter all events: `bus.filter(|e| f(e)).subscribe()`
-- [ ] Pre-filter events on a topic: `bus.topic(topic_name).filter(|e| f(e)).subscribe()`
-- [ ] Transform events: `bus.transform(|e| f(e))`
-
-- [ ] You can apply a `filter` to the bus as a whole or to a `topic`. You can apply a `transform` to the whole bus, a
-  `topic` or a `filter`ed bus/`topic`. 
-- [ ] The `filter` closures accept an `Event` and return `bool` to indicate whether to pass the event or not
-- [ ] The `transform` closures accept an `Event` and return Result<`Event`>
