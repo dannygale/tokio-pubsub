@@ -16,6 +16,7 @@ use channel::*;
 pub use publisher_subscriber::{Publisher, Subscriber};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+type Preproc<Event> = Box<dyn Fn(Event) -> Event + Send + 'static>;
 
 #[derive(Error, Debug)]
 pub enum PubSubError {
@@ -30,6 +31,8 @@ struct PubSub<Topic, Event> {
     events_tx: mpsc::Sender<(Topic, Event)>,
 
     shutdown: broadcast::Receiver<()>,
+
+    preproc: Option<Preproc<Event>>,
 
     capacity: usize,
 }
@@ -46,6 +49,7 @@ where
             events_rx: rx,
             events_tx: tx,
             shutdown,
+            preproc: None,
             capacity,
         }
     }
@@ -117,6 +121,12 @@ where
     }
 
     async fn process_event(&mut self, topic: &Topic, event: Event) {
+        let event = if let Some(ref func) = self.preproc {
+            func(event)
+        } else {
+            event
+        };
+
         if let Some(tx) = self.topics_tx.get(topic) {
             match tx.send(event) {
                 Ok(_n) => {
@@ -132,6 +142,10 @@ where
         } else {
             // no topic for this event, therefore no subscribers. do nothing
         }
+    }
+
+    pub fn preprocess(&mut self, f: Preproc<Event>) {
+        self.preproc = Some(f);
     }
 }
 

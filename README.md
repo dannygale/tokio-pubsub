@@ -7,13 +7,14 @@ An extensible pub/sub message passing implementation built on top of tokio's `br
 - [X] Dynamically created and pruned topics
 - [X] Struct-based publishers and subscribers that wrap broadcast channels
 - [X] "bound publish" -- topic assigned at publisher creation time
+- [X] Preprocess events
 - [ ] add support for serde 
 - [ ] Dynamically add/remove subscribers
 - [ ] In-band subscribe/unsubscribe
 - [ ] out-of-band subscribe/unsubscribe
-- [ ] Preprocess events
-- [ ] Transform events - by topic, subscriber, or arbitrary rule
-- [ ] Filter events - by arbitrary rule
+- [ ] Transform events - apply to topic, subscriber, or by closure
+- [ ] Filter events per subscriber by closure
+- [ ] Chain Filters and Transformations
 - [ ] Reimplement as a new type of channel instead of on top of broadcast channels
 
 ## Getting Started
