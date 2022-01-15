@@ -12,9 +12,11 @@ use tokio::{
 };
 
 mod channel;
+mod filter;
 mod publisher_subscriber;
-use channel::*;
-pub use publisher_subscriber::{Publisher, Subscriber};
+
+use filter::Filter;
+pub use publisher_subscriber::{BoundPublisher, Publisher, Subscriber};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type Preproc<Event> = Box<dyn Fn(Event) -> Event + Send + 'static>;
@@ -155,12 +157,12 @@ where
         self.control_tx.clone()
     }
 
-    pub fn channel(&self) -> mpsc::Sender<(Topic, Event)> {
+    pub fn publisher(&self) -> Publisher<Topic, Event> {
         self.meta(BusEvent::PublisherCreated);
-        self.events_tx.clone()
+        Publisher::new(self.events_tx.clone())
     }
 
-    pub async fn bound_channel(&self, topic: Topic) -> mpsc::Sender<Event> {
+    pub fn bind_publisher(&self, topic: Topic) -> BoundPublisher<Event> {
         let (ext_tx, mut rx) = mpsc::channel(self.capacity());
 
         let t = topic.clone();
@@ -178,7 +180,7 @@ where
         });
 
         self.meta(BusEvent::BoundPublisherCreated(topic));
-        ext_tx
+        BoundPublisher::new(ext_tx)
     }
 
     pub fn subscribe_meta(&self) -> broadcast::Receiver<BusEvent<Topic>> {
@@ -189,7 +191,7 @@ where
         self.sink_tx.subscribe()
     }
 
-    pub fn subscribe(&mut self, topic: Topic) -> broadcast::Receiver<Event> {
+    pub(crate) fn get_receiver(&mut self, topic: Topic) -> broadcast::Receiver<Event> {
         if let Some(tx) = self.topics_tx.get(&topic) {
             self.meta(BusEvent::SubscriberCreated(topic.clone()));
             tx.sender.subscribe()
@@ -201,6 +203,14 @@ where
             self.meta(BusEvent::SubscriberCreated(topic.clone()));
             rx
         }
+    }
+
+    pub fn subscriber(&mut self, topic: Topic) -> Subscriber<Topic, Event> {
+        let ext_rx = self.get_receiver(topic.clone());
+
+        let mut sub = Subscriber::new(self.capacity(), self.control_channel());
+        sub.add_rx(topic.clone(), ext_rx);
+        sub
     }
 
     fn create_topic(
@@ -266,7 +276,7 @@ where
     fn process_control_message(&mut self, msg: BusControl<Topic, Event>) {
         match msg {
             BusControl::Subscribe { topic, respond_to } => {
-                let rx = self.subscribe(topic);
+                let rx = self.get_receiver(topic);
                 let _ = respond_to.send(rx);
             }
             BusControl::DropTopic { topic } => self.drop_topic(&topic),
@@ -319,12 +329,12 @@ mod tests {
         let (stx, srx) = broadcast::channel(1);
         let mut bus = PubSub::<String, usize>::new(1, srx);
 
-        let mut sub1 = bus.subscribe("topic1".into());
-        let pub1 = bus.channel();
+        let mut sub1 = bus.get_receiver("topic1".into());
+        let pub1 = bus.publisher();
         tokio::spawn(async move { bus.run().await });
 
         let send_event = 123;
-        pub1.send(("topic1".into(), send_event.clone()))
+        pub1.send("topic1".into(), send_event.clone())
             .await
             .expect("couldn't send");
 
@@ -339,13 +349,13 @@ mod tests {
         let (stx, srx) = broadcast::channel(1);
         let mut bus = PubSub::<String, usize>::new(1, srx);
 
-        let mut sub1 = bus.subscribe("topic1".into());
-        let pub1 = bus.channel();
+        let mut sub1 = bus.get_receiver("topic1".into());
+        let pub1 = bus.publisher();
         tokio::spawn(async move { bus.run().await });
 
         let send_events = vec![123, 456, 789];
         for e in send_events.iter() {
-            pub1.send(("topic1".into(), e.clone()))
+            pub1.send("topic1".into(), e.clone())
                 .await
                 .expect("couldn't send");
 
@@ -361,13 +371,13 @@ mod tests {
         let (stx, srx) = broadcast::channel(1);
         let mut bus = PubSub::<String, usize>::new(16, srx);
 
-        let mut sub1 = bus.subscribe("topic1".into());
-        let pub1 = bus.channel();
+        let mut sub1 = bus.get_receiver("topic1".into());
+        let pub1 = bus.publisher();
         tokio::spawn(async move { bus.run().await });
 
         let send_events = vec![123, 456, 789];
         for e in send_events.iter() {
-            pub1.send(("topic1".into(), e.clone()))
+            pub1.send("topic1".into(), e.clone())
                 .await
                 .expect("couldn't send");
         }
@@ -385,13 +395,13 @@ mod tests {
         let (stx, srx) = broadcast::channel(1);
         let mut bus = PubSub::<String, usize>::new(1, srx);
 
-        let mut sub1 = bus.subscribe("topic1".into());
-        let mut sub2 = bus.subscribe("topic1".into());
-        let pub1 = bus.channel();
+        let mut sub1 = bus.get_receiver("topic1".into());
+        let mut sub2 = bus.get_receiver("topic1".into());
+        let pub1 = bus.publisher();
         tokio::spawn(async move { bus.run().await });
 
         let send_event = 123;
-        pub1.send(("topic1".into(), send_event.clone()))
+        pub1.send("topic1".into(), send_event.clone())
             .await
             .expect("couldn't send");
 
@@ -408,14 +418,14 @@ mod tests {
         let (stx, srx) = broadcast::channel(1);
         let mut bus = PubSub::<String, usize>::new(1, srx);
 
-        let mut sub1 = bus.subscribe("topic1".into());
-        let mut sub2 = bus.subscribe("topic1".into());
-        let pub1 = bus.channel();
+        let mut sub1 = bus.get_receiver("topic1".into());
+        let mut sub2 = bus.get_receiver("topic1".into());
+        let pub1 = bus.publisher();
         tokio::spawn(async move { bus.run().await });
 
         let send_events = vec![123, 456, 789];
         for e in send_events.iter() {
-            pub1.send(("topic1".into(), e.clone()))
+            pub1.send("topic1".into(), e.clone())
                 .await
                 .expect("couldn't send");
 
@@ -433,14 +443,14 @@ mod tests {
         let (stx, srx) = broadcast::channel(1);
         let mut bus = PubSub::<String, usize>::new(16, srx);
 
-        let mut sub1 = bus.subscribe("topic1".into());
-        let mut sub2 = bus.subscribe("topic1".into());
-        let pub1 = bus.channel();
+        let mut sub1 = bus.get_receiver("topic1".into());
+        let mut sub2 = bus.get_receiver("topic1".into());
+        let pub1 = bus.publisher();
         tokio::spawn(async move { bus.run().await });
 
         let send_events = vec![123, 456, 789];
         for e in send_events.iter() {
-            pub1.send(("topic1".into(), e.clone()))
+            pub1.send("topic1".into(), e.clone())
                 .await
                 .expect("couldn't send");
         }
@@ -462,18 +472,18 @@ mod tests {
         let (stx, srx) = broadcast::channel(1);
         let mut bus = PubSub::<String, usize>::new(16, srx);
 
-        let mut sub1 = bus.subscribe("topic1".into());
-        let pub1 = bus.channel();
-        let pub2 = bus.channel();
+        let mut sub1 = bus.get_receiver("topic1".into());
+        let pub1 = bus.publisher();
+        let pub2 = bus.publisher();
         tokio::spawn(async move { bus.run().await });
 
         let send_events = vec![123, 456, 789];
 
         for e in send_events.iter() {
-            pub1.send(("topic1".into(), e.clone()))
+            pub1.send("topic1".into(), e.clone())
                 .await
                 .expect("couldn't send");
-            pub2.send(("topic1".into(), e.clone()))
+            pub2.send("topic1".into(), e.clone())
                 .await
                 .expect("couldn't send");
         }
@@ -504,37 +514,37 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
         let mut bus = PubSub::<String, ApolloEvent>::new(16, shutdown_rx);
 
-        let apollo11 = bus.channel();
-        let apollo13 = bus.channel();
+        let apollo11 = bus.publisher();
+        let apollo13 = bus.publisher();
 
-        let mut houston1 = bus.subscribe("apollo11".into());
-        let mut houston2 = bus.subscribe("apollo13".into());
+        let mut houston1 = bus.get_receiver("apollo11".into());
+        let mut houston2 = bus.get_receiver("apollo13".into());
 
         tokio::spawn(async move { bus.run().await });
 
         apollo11
-            .send(("apollo11".into(), ApolloEvent::Ignition))
+            .send("apollo11".into(), ApolloEvent::Ignition)
             .await
             .unwrap();
         apollo11
-            .send(("apollo11".into(), ApolloEvent::Liftoff))
+            .send("apollo11".into(), ApolloEvent::Liftoff)
             .await
             .unwrap();
         apollo11
-            .send(("apollo11".into(), ApolloEvent::EagleHasLanded))
+            .send("apollo11".into(), ApolloEvent::EagleHasLanded)
             .await
             .unwrap();
 
         apollo13
-            .send(("apollo13".into(), ApolloEvent::Ignition))
+            .send("apollo13".into(), ApolloEvent::Ignition)
             .await
             .unwrap();
         apollo13
-            .send(("apollo13".into(), ApolloEvent::Liftoff))
+            .send("apollo13".into(), ApolloEvent::Liftoff)
             .await
             .unwrap();
         apollo13
-            .send(("apollo13".into(), ApolloEvent::HoustonWeHaveAProblem))
+            .send("apollo13".into(), ApolloEvent::HoustonWeHaveAProblem)
             .await
             .unwrap();
 
