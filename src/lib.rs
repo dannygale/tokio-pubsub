@@ -162,6 +162,8 @@ where
         Publisher::new(self.events_tx.clone())
     }
 
+    // TODO: should I push this complexity down into the BoundPublisher struct?
+    // Kind of feel like I should. Then there's no special handling on the bus side of things...
     pub fn bind_publisher(&self, topic: Topic) -> BoundPublisher<Event> {
         let (ext_tx, mut rx) = mpsc::channel(self.capacity());
 

@@ -2,6 +2,7 @@ use super::{BusControl, PubSub, Result};
 
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_stream::{self as stream, Stream, StreamExt, StreamMap};
@@ -122,6 +123,14 @@ where
     }
 }
 
+impl<Topic: Unpin, Event> Stream for Subscriber<Topic, Event> {
+    type Item = (Topic, Event);
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().rx.poll_recv(cx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,7 +165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recv_recvs_event() {
+    async fn recvr_recvs_event() {
         let (tx, mut rx) = broadcast::channel(16);
         let (ctl_tx, ctl_rx): (
             mpsc::Sender<BusControl<String, usize>>,
@@ -172,7 +181,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recv_recvs_events() {
+    async fn recvr_recvs_events() {
         let (tx, mut rx) = broadcast::channel(16);
         let (ctl_tx, ctl_rx): (
             mpsc::Sender<BusControl<String, usize>>,
