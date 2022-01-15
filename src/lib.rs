@@ -12,14 +12,15 @@ use tokio::{
 };
 
 mod channel;
-mod filter;
+//mod filter;
 mod publisher_subscriber;
 
-use filter::Filter;
+//use filter::Filter;
 pub use publisher_subscriber::{BoundPublisher, Publisher, Subscriber};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type Preproc<Event> = Box<dyn Fn(Event) -> Event + Send + 'static>;
+type Filter<Event> = Box<dyn Fn(Event) -> bool>;
 
 #[derive(Error, Debug)]
 pub enum PubSubError {
