@@ -59,6 +59,7 @@ pub enum BusEvent<Topic> {
     NoSubscribers(Topic),
 
     ShutdownReceived,
+    ShutdownCompleted,
     //ReceivedUserEvent(Event),
     //PreprocessedEvent(Event, Event),
     //SentEventToTopic(Topic, Event),
@@ -66,6 +67,7 @@ pub enum BusEvent<Topic> {
     PreprocessorCleared,
 
     ControlChannelCreated,
+
 }
 
 struct TopicInfo<Event> {
@@ -239,6 +241,7 @@ where
 
     pub async fn run(&mut self) {
         loop {
+            if self.events_rx.
             tokio::select! {
                 result = self.events_rx.recv() => {
                     if let Some((topic, event)) = result {
@@ -286,9 +289,20 @@ where
             BusControl::DropTopic { topic } => self.drop_topic(&topic),
             BusControl::SetPreprocessor { preproc } => self.set_preprocessor(preproc),
             BusControl::ClearPreprocessor => self.clear_preprocessor(),
-            BusControl::Shutdown => drop(self),
+            // TODO: is this actually what I want to do here?
+            // Note that this will NOT kill any receivers that have been added with
+            // Subscriber.add_rx
+            BusControl::Shutdown => self.shutdown(),
         }
     }
+
+    fn shutdown(&mut self) {
+        self.meta_tx.send(BusEvent::ShutdownReceived);
+        self.events_rx.close();
+        self.control_rx.close();
+        self.meta_tx.send(BusEvent::ShutdownCompleted);
+    }
+
 
     async fn process_event(&mut self, topic: &Topic, event: Event) {
         self.sink(event.clone());
