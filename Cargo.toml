@@ -11,6 +11,7 @@ repository = "github.com/dannygale/tokio-pubsub/"
 [dependencies]
 async-stream = "0.3.2"
 dashmap = "5.0.0"
+futures = "0.3.19"
 thiserror = "1.0.30"
 tokio = { version = "1.15.0", features = [ "full" ]}
 tokio-stream = "0.1.8"

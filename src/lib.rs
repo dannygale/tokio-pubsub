@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{self, Context, Poll};
+
+use futures::task::noop_waker;
 
 //use dashmap::DashMap;
 use thiserror::Error;
@@ -45,6 +48,8 @@ pub enum BusControl<Topic, Event> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum BusEvent<Topic> {
+    BusIdle,
+
     SubscriberCreated(Topic),
     // TODO: SubscriberDropped
     SubscribersDropped(Topic, usize),
@@ -238,8 +243,26 @@ where
         self.topics_tx.remove(topic);
     }
 
+    fn events_empty(&mut self) -> bool {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        match self.events_rx.poll_recv(&mut cx) {
+            Poll::Pending => true,
+            _ => false,
+        }
+    }
+
     pub async fn run(&mut self) {
+        let mut idle = true;
         loop {
+            if !idle {
+                idle = self.events_empty();
+                if idle {
+                    self.meta(BusEvent::BusIdle);
+                }
+            }
+
             tokio::select! {
                 result = self.events_rx.recv() => {
                     if let Some((topic, event)) = result {
@@ -517,6 +540,8 @@ mod tests {
         all_events.sort();
         recv_events.sort();
 
+        assert_eq!(all_events, recv_events);
+
         stx.send(()).unwrap();
     }
 
@@ -579,7 +604,7 @@ mod tests {
                 }
             }
         });
-        sleep(Duration::from_nanos(1)).await;
+        sleep(Duration::from_nanos(0)).await;
         shutdown_tx.send(()).unwrap();
 
         let (apollo11_events, apollo13_events) = apollo_future.await.unwrap();
@@ -600,5 +625,25 @@ mod tests {
                 ApolloEvent::HoustonWeHaveAProblem
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn bus_empty() {
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let mut bus = PubSub::<String, usize>::new(16, shutdown_rx);
+
+        let mut meta = bus.subscribe_meta();
+
+        let pub1 = bus.publisher();
+        pub1.send("topic1".into(), 1).await;
+
+        sleep(Duration::from_nanos(0)).await;
+
+        let event = meta.recv().await.unwrap();
+        assert_eq!(event, BusEvent::PublisherCreated);
+        //let event = meta.recv().await.unwrap();
+        //assert_eq!(event, BusEvent::BusIdle);
+
+        bus.shutdown();
     }
 }
