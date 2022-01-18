@@ -13,7 +13,6 @@ use tokio::{
     sync::{broadcast, mpsc, oneshot},
 };
 
-mod channel;
 //mod filter;
 mod publisher_subscriber;
 
