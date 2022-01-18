@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{self, Context, Poll};
+use std::task::{Context, Poll};
 
 use futures::task::noop_waker;
 
@@ -11,7 +11,6 @@ use thiserror::Error;
 use tokio::{
     self,
     sync::{broadcast, mpsc, oneshot},
-    time::{sleep, Duration},
 };
 
 mod channel;
@@ -107,11 +106,9 @@ pub struct PubSub<Topic, Event> {
 
     // channel for emitting bus events
     meta_tx: broadcast::Sender<BusEvent<Topic>>,
-    meta_rx: broadcast::Receiver<BusEvent<Topic>>,
 
     // sink all user events
     sink_tx: broadcast::Sender<Event>,
-    sink_rx: broadcast::Receiver<Event>,
 
     // optional event preprocessor
     // eg - to sequence events
@@ -128,8 +125,8 @@ where
     pub fn new(capacity: usize, shutdown: broadcast::Receiver<()>) -> Self {
         let (events_tx, events_rx) = mpsc::channel(capacity);
         let (control_tx, control_rx) = mpsc::channel(capacity);
-        let (meta_tx, meta_rx) = broadcast::channel(capacity);
-        let (sink_tx, sink_rx) = broadcast::channel(capacity);
+        let (meta_tx, _) = broadcast::channel(capacity);
+        let (sink_tx, _) = broadcast::channel(capacity);
 
         Self {
             topics_tx: HashMap::new(),
@@ -139,9 +136,7 @@ where
             control_tx,
             control_rx,
             meta_tx,
-            meta_rx,
             sink_tx,
-            sink_rx,
 
             shutdown,
             preproc: None,
@@ -321,10 +316,10 @@ where
             let event = self.preprocess_event(event);
             self.process_event(&topic, event).await;
         }
-        self.meta_tx.send(BusEvent::ShutdownReceived);
+        let _ = self.meta_tx.send(BusEvent::ShutdownReceived);
         self.events_rx.close();
         self.control_rx.close();
-        self.meta_tx.send(BusEvent::ShutdownCompleted);
+        let _ = self.meta_tx.send(BusEvent::ShutdownCompleted);
     }
 
     async fn process_event(&mut self, topic: &Topic, event: Event) {
@@ -365,6 +360,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::time::{sleep, Duration};
 
     #[tokio::test]
     async fn sub_recv_event() {
@@ -635,7 +631,7 @@ mod tests {
         let mut meta = bus.subscribe_meta();
 
         let pub1 = bus.publisher();
-        pub1.send("topic1".into(), 1).await;
+        pub1.send("topic1".into(), 1).await.unwrap();
 
         sleep(Duration::from_nanos(0)).await;
 
@@ -644,6 +640,6 @@ mod tests {
         //let event = meta.recv().await.unwrap();
         //assert_eq!(event, BusEvent::BusIdle);
 
-        bus.shutdown();
+        bus.shutdown().await;
     }
 }

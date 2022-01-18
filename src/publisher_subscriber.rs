@@ -1,14 +1,11 @@
-use super::{BusControl, Filter, PubSub, Result};
+use super::{BusControl, Filter};
 
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::marker::PhantomData;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
 use async_stream::stream;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio_stream::{Stream, StreamExt, StreamMap};
+use tokio_stream::Stream;
 
 pub mod error {
     use super::*;
@@ -23,17 +20,7 @@ pub mod error {
             SendError::SendError
         }
     }
-
-    pub enum RecvError {
-        RecvError,
-    }
-    impl Into<error::RecvError> for mpsc::error::RecvError {
-        fn into(self) -> error::RecvError {
-            RecvError::RecvError
-        }
-    }
 }
-use error::{RecvError, SendError};
 
 pub struct Publisher<Topic, Event> {
     tx: mpsc::Sender<(Topic, Event)>,
@@ -66,7 +53,7 @@ impl<Event: Send> BoundPublisher<Event> {
         self.tx
             .send(msg)
             .await
-            .map_err(|e| error::SendError::SendError)
+            .map_err(|_| error::SendError::SendError)
     }
 }
 
@@ -135,9 +122,7 @@ where
     }
 
     pub async fn recv(&mut self) -> Option<(Topic, Event)> {
-        let mut n = 0;
         while let Some((topic, event)) = self.rx.recv().await {
-            n += 1;
             let filters = self.filters.entry(topic.clone()).or_default();
             if filters.iter().all(|func| func(event.clone())) {
                 return Some((topic, event));
@@ -146,13 +131,10 @@ where
         None
     }
 
-    pub async fn stream(&mut self) -> impl Stream<Item = Event> + '_ {
+    pub async fn stream(&mut self) -> impl Stream<Item = (Topic, Event)> + '_ {
         stream! {
-            while let Some((topic, event)) = self.rx.recv().await {
-                let filters = self.filters.entry(topic).or_default();
-                if filters.iter().all(|func| func(event.clone())) {
-                    yield event;
-                }
+            while let Some((topic, event)) = self.recv().await {
+                yield ((topic, event));
             }
         }
     }
@@ -168,7 +150,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(n);
         let publisher = Publisher::new(tx);
 
-        publisher.send("topic1", 1).await;
+        publisher.send("topic1", 1).await.unwrap();
         let (_topic, event) = rx.recv().await.unwrap();
 
         assert_eq!(1, event);
@@ -181,12 +163,12 @@ mod tests {
         let publisher = Publisher::new(tx);
 
         for i in 0..n {
-            publisher.send("topic1", i).await;
+            publisher.send("topic1", i).await.unwrap();
         }
 
         let mut received = vec![];
-        for i in 0..n {
-            let (topic, event) = rx.recv().await.unwrap();
+        for _i in 0..n {
+            let (_topic, event) = rx.recv().await.unwrap();
             received.push(event);
         }
 
@@ -196,16 +178,16 @@ mod tests {
     #[tokio::test]
     async fn sub_recvs_event() {
         let n = 16;
-        let (tx, mut rx) = broadcast::channel(n);
-        let (ctl_tx, ctl_rx): (
+        let (tx, rx) = broadcast::channel(n);
+        let (ctl_tx, _ctl_rx): (
             mpsc::Sender<BusControl<String, usize>>,
             mpsc::Receiver<BusControl<String, usize>>,
         ) = mpsc::channel(n);
         let mut subscriber = Subscriber::new(n, ctl_tx.clone());
         subscriber.add_rx("topic1".into(), rx);
 
-        tx.send(1);
-        let (topic, event) = subscriber.recv().await.unwrap();
+        tx.send(1).unwrap();
+        let (_topic, event) = subscriber.recv().await.unwrap();
 
         assert_eq!(1, event);
     }
@@ -213,8 +195,8 @@ mod tests {
     #[tokio::test]
     async fn sub_recvs_events() {
         let n = 16;
-        let (tx, mut rx) = broadcast::channel(n);
-        let (ctl_tx, ctl_rx): (
+        let (tx, rx) = broadcast::channel(n);
+        let (ctl_tx, _ctl_rx): (
             mpsc::Sender<BusControl<String, usize>>,
             mpsc::Receiver<BusControl<String, usize>>,
         ) = mpsc::channel(n);
@@ -222,12 +204,12 @@ mod tests {
         subscriber.add_rx("topic1".into(), rx);
 
         for i in 0..n {
-            tx.send(i);
+            tx.send(i).unwrap();
         }
 
         let mut received = vec![];
-        for i in 0..n {
-            let (topic, event) = subscriber.recv().await.unwrap();
+        for _i in 0..n {
+            let (_topic, event) = subscriber.recv().await.unwrap();
             received.push(event);
         }
         assert_eq!((0usize..n).collect::<Vec<usize>>(), received);
@@ -236,8 +218,8 @@ mod tests {
     #[tokio::test]
     async fn sub_filters_events() {
         let n = 16;
-        let (tx, mut rx) = broadcast::channel(n);
-        let (ctl_tx, ctl_rx): (
+        let (tx, rx) = broadcast::channel(n);
+        let (ctl_tx, _ctl_rx): (
             mpsc::Sender<BusControl<String, usize>>,
             mpsc::Receiver<BusControl<String, usize>>,
         ) = mpsc::channel(n);
@@ -247,14 +229,14 @@ mod tests {
 
         for i in 0..n {
             println!("sending {}", i);
-            tx.send(i);
+            tx.send(i).unwrap();
         }
         drop(tx);
         subscriber.shutdown();
 
         let mut received: Vec<usize> = vec![];
-        for i in 0..n {
-            while let Some((topic, event)) = subscriber.recv().await {
+        for _i in 0..n {
+            while let Some((_topic, event)) = subscriber.recv().await {
                 println!("received {}", event);
                 received.push(event);
             }
