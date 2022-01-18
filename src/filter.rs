@@ -1,5 +1,3 @@
-use super::Preproc;
-
 #[derive(Default)]
 pub struct Filter<Topic, Event> {
     topic: Option<Topic>,

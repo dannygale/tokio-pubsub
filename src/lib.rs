@@ -40,6 +40,7 @@ pub enum BusControl<Topic, Event> {
         preproc: Preproc<Event>,
     },
     ClearPreprocessor,
+    Shutdown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -285,6 +286,7 @@ where
             BusControl::DropTopic { topic } => self.drop_topic(&topic),
             BusControl::SetPreprocessor { preproc } => self.set_preprocessor(preproc),
             BusControl::ClearPreprocessor => self.clear_preprocessor(),
+            BusControl::Shutdown => drop(self),
         }
     }
 
