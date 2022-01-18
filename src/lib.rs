@@ -67,7 +67,6 @@ pub enum BusEvent<Topic> {
     PreprocessorCleared,
 
     ControlChannelCreated,
-
 }
 
 struct TopicInfo<Event> {
@@ -241,7 +240,6 @@ where
 
     pub async fn run(&mut self) {
         loop {
-            if self.events_rx.
             tokio::select! {
                 result = self.events_rx.recv() => {
                     if let Some((topic, event)) = result {
@@ -254,15 +252,14 @@ where
                 },
                 result = self.control_rx.recv() => {
                     if let Some(ctl_msg) = result {
-                        self.process_control_message(ctl_msg);
+                        self.process_control_message(ctl_msg).await;
                     } else {
                         unreachable!();
                     }
                 }
                 _ = self.shutdown.recv() => {
                     // TODO: propagate to receivers
-                    self.meta(BusEvent::ShutdownReceived);
-                    sleep(Duration::from_millis(100)).await;
+                    self.shutdown().await;
                     return
                 }
             };
@@ -280,7 +277,7 @@ where
         }
     }
 
-    fn process_control_message(&mut self, msg: BusControl<Topic, Event>) {
+    async fn process_control_message(&mut self, msg: BusControl<Topic, Event>) {
         match msg {
             BusControl::Subscribe { topic, respond_to } => {
                 let rx = self.get_receiver(topic);
@@ -292,17 +289,20 @@ where
             // TODO: is this actually what I want to do here?
             // Note that this will NOT kill any receivers that have been added with
             // Subscriber.add_rx
-            BusControl::Shutdown => self.shutdown(),
+            BusControl::Shutdown => self.shutdown().await,
         }
     }
 
-    fn shutdown(&mut self) {
+    async fn shutdown(&mut self) {
+        while let Some((topic, event)) = self.events_rx.recv().await {
+            let event = self.preprocess_event(event);
+            self.process_event(&topic, event).await;
+        }
         self.meta_tx.send(BusEvent::ShutdownReceived);
         self.events_rx.close();
         self.control_rx.close();
         self.meta_tx.send(BusEvent::ShutdownCompleted);
     }
-
 
     async fn process_event(&mut self, topic: &Topic, event: Event) {
         self.sink(event.clone());
@@ -579,7 +579,7 @@ mod tests {
                 }
             }
         });
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_nanos(1)).await;
         shutdown_tx.send(()).unwrap();
 
         let (apollo11_events, apollo13_events) = apollo_future.await.unwrap();
